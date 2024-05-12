@@ -45,6 +45,7 @@ struct KiddiePool {
 
 static int resize_pool(KiddiePool *pool, unsigned int numgrps, bool additional);
 static int internal_create_group(KiddiePool *kp, KiddieGroup **kg, unsigned int numthrds, int groupId);
+static void internal_destroy_group(KiddieGroup *kg);
 static void *thread_function(void *pool);
 
 static int q_init(struct Q **q, size_t capacity);
@@ -130,34 +131,10 @@ void destroy_group(KiddiePool *pool, int groupId) {
         pthread_mutex_unlock(&pool->mutex_kp);
         return;
     }
+
     kg = pool->kiddie_groups[groupId];
-    pthread_mutex_unlock(&pool->mutex_kp);
+    internal_destroy_group(kg);
 
-    pthread_mutex_lock(&(kg->mutex_kg));
-    total_thread_count = kg->thread_count;
-    kg->kill = 1;
-
-    while(kg->thread_count != 0) {
-        pthread_cond_broadcast(&(kg->cond_kg));
-        pthread_cond_wait(&(kg->kill_cond_kg), &(kg->mutex_kg));
-    }
-
-    for (size_t i = 0; i < total_thread_count; i++) {
-        pthread_join(kg->threads[i], NULL);
-    }
-
-    free(kg->threads);
-    kg->threads = NULL;
-
-    q_destroy(&(kg->q));
-
-    pthread_mutex_destroy(&(kg->mutex_kg));
-    pthread_cond_destroy(&(kg->cond_kg));
-    pthread_cond_destroy(&(kg->kill_cond_kg));
-
-    free(kg);
-
-    pthread_mutex_lock(&pool->mutex_kp);
     resize_pool(pool, 1, false);
 
     pool->totalNumThrds -= total_thread_count;
@@ -200,18 +177,20 @@ int add_work(KiddiePool *pool, int groupId, work_func wf, void *work_arg) {
 
 void destroy_pool(KiddiePool *pool) {
     if(pool != NULL) {
-        pthread_mutex_lock(&(pool->mutex_kp));
-        for (size_t i = 0; i < pool->num_groups; i++)
-        {
-            destroy_group(&(pool->kiddie_groups[i]));
-        }
-        free(pool->kiddie_groups);
-        pool->kiddie_groups = NULL;
-
-        pthread_mutex_destroy(&(pool->mutex_kp));
-
-        free(pool);
+        return;
     }
+    
+    pthread_mutex_lock(&(pool->mutex_kp));
+    for (size_t i = 0; i < pool->totalNumGrps; i++)
+    {
+        internal_destroy_group(pool->kiddie_groups[i]);
+    }
+    free(pool->kiddie_groups);
+    pool->kiddie_groups = NULL;
+
+    pthread_mutex_destroy(&(pool->mutex_kp));
+
+    free(pool);
 }
 
 static int resize_pool(KiddiePool *pool, unsigned int numgrps, bool additional) {
@@ -276,6 +255,34 @@ static int internal_create_group(KiddiePool *kp, KiddieGroup **kg, unsigned int 
     }
 
     return 0;
+}
+
+static void internal_destroy_group(KiddieGroup *kg) {
+    size_t total_thread_count;
+
+    pthread_mutex_lock(&(kg->mutex_kg));
+    total_thread_count = kg->thread_count;
+    kg->kill = 1;
+
+    while(kg->thread_count != 0) {
+        pthread_cond_broadcast(&(kg->cond_kg));
+        pthread_cond_wait(&(kg->kill_cond_kg), &(kg->mutex_kg));
+    }
+
+    for (size_t i = 0; i < total_thread_count; i++) {
+        pthread_join(kg->threads[i], NULL);
+    }
+
+    free(kg->threads);
+    kg->threads = NULL;
+
+    q_destroy(&(kg->q));
+
+    pthread_mutex_destroy(&(kg->mutex_kg));
+    pthread_cond_destroy(&(kg->cond_kg));
+    pthread_cond_destroy(&(kg->kill_cond_kg));
+
+    free(kg);
 }
 
 static void *thread_function(void *arg) {
