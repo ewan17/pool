@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <pthread.h>
 #include "kiddiepool.h"
 
 struct Node {
@@ -17,35 +18,16 @@ struct Q {
     size_t capacity;
 };
 
-struct KiddieGroup {
-    pthread_mutex_t mutex_kg;
-    pthread_cond_t cond_kg;
-    pthread_cond_t kill_cond_kg;
+static int resize_pool(TPool *pool, unsigned int numGrps, bool additional);
+static int resize_group(TGroup *tg, unsigned int numThrds, bool additional);
+static bool within_limits(unsigned int amnt, unsigned int currSize, unsigned int min, unsigned int max, bool additional);
+static unsigned int resize_factor(unsigned int proposedSize, unsigned int currSize, unsigned int lowerLimit, unsigned int upperLimit);
 
-    pthread_t *threads;
+static void internal_maintenance_group(TGroup *tg, int flag);
+static TGroup *internal_create_group(TPool *kp, unsigned int numthrds, unsigned int min, unsigned int max, int groupId);
 
-    int id;
-    size_t thread_count;
-    size_t active_threads;
-    int kill;
+static void internal_destroy_thread(TThread *tt, TGroup *tg);
 
-    struct Q *q;
-
-    KiddiePool *pool;
-};
-
-struct KiddiePool {
-    pthread_mutex_t mutex_kp;
-
-    unsigned int totalNumThrds;
-    unsigned int totalNumGrps;
-
-    KiddieGroup **kiddie_groups;
-};
-
-static int resize_pool(KiddiePool *pool, unsigned int numgrps, bool additional);
-static int internal_create_group(KiddiePool *kp, KiddieGroup **kg, unsigned int numthrds, int groupId);
-static void internal_destroy_group(KiddieGroup *kg);
 static void *thread_function(void *pool);
 
 static int q_init(struct Q **q, size_t capacity);
@@ -57,45 +39,31 @@ static int q_length(struct Q *q);
 
 static void node_kill(struct Node *node);
 
-int init_pool(KiddiePool **pool, unsigned int numgrps) {
+int init_pool(TPool **pool, unsigned int maxThrds, unsigned int size) {
     if(pool == NULL) {
         return -1;
     }
 
-    *pool = (KiddiePool *)malloc(sizeof(KiddiePool));
+    *pool = (TPool *)malloc(sizeof(TPool));
     if(*pool == NULL) {
-        fprintf(stderr, "Failed to allocate memory for KiddiePool\n");
         return -1;
     }
 
-    KiddiePool *kp = *pool;
-    kp->kiddie_groups = NULL;
-    kp->totalNumGrps = 0;
+    TPool *tp = *pool;
+    bool isDefault = false;
 
-    if(resize_pool(kp, numgrps, true) != 0) {
-		free(kp);
-        kp = NULL;
+    tp->maxThrds = (maxThrds > 0 && maxThrds < MAX_THREADS) ? maxThrds : MAX_THREADS;
+    tp->totalThrds = 0;
+    tp->totalGrps = 0;
+    tp->tGrp = NULL;
+    pthread_mutex_init(&tp->mutexPool, NULL);
+
+    if(resize_pool(tp, size, true) != 0) {
+		free(tp);
+        tp = NULL;
         return -1;
     }
-
-    pthread_mutex_init(&(kp->mutex_kp), NULL);
     
-    for (size_t i = 0; i < numgrps; i++)
-    {    
-        KiddieGroup *kg;
-
-        int rc;
-        rc = internal_create_group(kp, &kg, DEFAULT_THREADS_PER_GROUP, i);
-
-        if(rc != 0) {
-            /**
-             * @note    all groups get initialized or none of them
-            */
-            destroy_pool(*pool);
-            *pool = NULL;
-            return -1;
-        };
-    }
     return 0;
 }
 
@@ -103,228 +71,425 @@ int init_pool(KiddiePool **pool, unsigned int numgrps) {
  * @note    currently we have no limit on the number of threads and groups
  * @todo    will need to add limit checks later
 */
-int add_group(KiddiePool *pool, unsigned int numthrds) {
-    KiddieGroup *kg;
-    internal_create_group(pool, &kg, numthrds, pool->totalNumGrps);
+TGroup *add_group(TPool *pool, int id, unsigned int numthrds, unsigned int min, unsigned int max) {
+    TGroup *tg;
 
-    pthread_mutex_lock(&pool->mutex_kp);
+    pthread_mutex_lock(&pool->mutexPool);
     if(resize_pool(pool, 1, true) != 0) {
+        pthread_mutex_unlock(&pool->mutexPool);
+        return -1;
+    }
+    pthread_mutex_unlock(&pool->mutexPool);
+
+    tg = internal_create_group(pool, numthrds, min, max, id);
+    if(tg == NULL) {
         return -1;
     }
 
-    unsigned int index = pool->totalNumGrps;
+    pthread_mutex_lock(&pool->mutexPool);
+    unsigned int index = pool->totalGrps;
+    pool->totalGrps++;
+    pool->totalThrds += numthrds;
+    pool->tGrp[index] = tg;
+    pthread_mutex_unlock(&pool->mutexPool);
 
-    pool->totalNumGrps++;
-    pool->totalNumThrds += numthrds;
-    pool->kiddie_groups[index] = kg;
-    pthread_mutex_unlock(&pool->mutex_kp);
-
-    return 0;
+    return tg;
 }
 
-void destroy_group(KiddiePool *pool, int groupId) {
-    KiddieGroup *kg;
-    size_t total_thread_count;
-
-    pthread_mutex_lock(&pool->mutex_kp);
-    if(groupId < 0 || groupId > (pool->totalNumGrps - 1)) {
-        pthread_mutex_unlock(&pool->mutex_kp);
+/**
+ * @todo    the internal maintenance function needs to be fixed for this to work
+*/
+void destroy_group(TGroup *tg) {
+    if(tg == NULL) {
         return;
     }
 
-    kg = pool->kiddie_groups[groupId];
-    internal_destroy_group(kg);
-
-    resize_pool(pool, 1, false);
-
-    pool->totalNumThrds -= total_thread_count;
-    pool->totalNumGrps--;
-    pthread_mutex_unlock(&pool->mutex_kp);
+    internal_maintenance_group(tg, SOFT_KILL);
 }
 
-int add_work(KiddiePool *pool, int groupId, work_func wf, void *work_arg) {
+int add_work(TGroup *tg, work_func wf, void *work_arg) {
     if(wf == NULL) {
         return -1;
     }
 
-    pthread_mutex_lock(&(pool->mutex_kp));
-    if(groupId < 0 || groupId > (pool->totalNumGrps - 1)) {
-        pthread_mutex_unlock(&(pool->mutex_kp));
-        return -1; 
-    }
+    TThread *tt;
 
-    KiddieGroup *kg;
-    kg = pool->kiddie_groups[groupId];
-    pthread_mutex_unlock(&(pool->mutex_kp));
-
-    struct Node *node;
-    node = (struct Node *)malloc(sizeof(struct Node));
-    if(node == NULL) {
-        fprintf(stderr, "Failed to allocate memory for KiddieGroups\n");
+    struct Node *task;
+    task = (struct Node *)malloc(sizeof(struct Node));
+    if(task == NULL) {
         return -1;
     }
-    node->wf = wf;
-    node->work_arg = work_arg;
-    node->prev = NULL;
+    task->wf = wf;
+    task->work_arg = work_arg;
+    task->prev = NULL;
 
-    pthread_mutex_lock(&(kg->mutex_kg));
-    q_append(kg->q, node);
-    pthread_cond_signal(&(kg->cond_kg));
-    pthread_mutex_unlock(&(kg->mutex_kg));
+    pthread_mutex_lock(&tg->mutexGrp);
+    /**
+     * @todo    check the idle list for a thread
+    */
+    if(tt != NULL) {
+        /**
+         * @todo    move thread into the active threads
+        */
+    } else {
+        // currently there are no idle threads
+        q_append(tg->q, task);
+        pthread_mutex_unlock(&tg->mutexGrp);
+        return 0;
+    }
+    pthread_mutex_unlock(&tg->mutexGrp);
+
+    pthread_mutex_lock(&tt->mutexThrd);
+    tt->task = tt;
+    tt->state = RUNNING;
+    pthread_cond_signal(&tt->condThrd);
+    pthread_mutex_unlock(&tt->mutexThrd);
 
     return 0;
 }
 
-void destroy_pool(KiddiePool *pool) {
+/**
+ * @todo    needs fixing with all the other destory methods
+*/
+void destroy_pool(TPool *pool) {
     if(pool != NULL) {
         return;
     }
     
-    pthread_mutex_lock(&(pool->mutex_kp));
-    for (size_t i = 0; i < pool->totalNumGrps; i++)
-    {
-        internal_destroy_group(pool->kiddie_groups[i]);
-    }
-    free(pool->kiddie_groups);
-    pool->kiddie_groups = NULL;
-
-    pthread_mutex_destroy(&(pool->mutex_kp));
+    pthread_mutex_lock(&(pool->mutexPool));
+    
+    pthread_mutex_destroy(&(pool->mutexPool));
 
     free(pool);
 }
 
-static int resize_pool(KiddiePool *pool, unsigned int numgrps, bool additional) {
-    unsigned int currNumGrps = pool->totalNumGrps;
-    if(additional) {
-        currNumGrps += additional;
-    } else {
-        currNumGrps -= additional;
-    }
+int add_thread(TGroup *tg) {
+    TThread *tt;
 
-    pool->kiddie_groups = (KiddieGroup **) realloc(pool->kiddie_groups, currNumGrps * sizeof(KiddieGroup *));
-    if(pool->kiddie_groups == NULL) {
+    tt = (TThread *)malloc(sizeof(TThread));
+    if(tt == NULL) {
         return -1;
     }
-    
-    pool->totalNumGrps = currNumGrps;
+
+    tt->state = RUNNING;
+    tt->tg = tg;
+    tt->task = NULL;
+
+    if(pthread_mutex_init(&tt->mutexThrd, NULL)) {
+        goto error;
+    }
+
+    if(pthread_cond_init(&tt->condThrd, NULL)) {
+        goto error;
+    }
+
+    /**
+     * @todo    add limit error on the number of threads that can be added to the group
+    */
+    pthread_mutex_lock(&tg->mutexGrp);
+    if(!within_limits(1, tg->tThrdSize, tg->thrdMin, tg->thrdLimit, true)) {
+        goto error;
+    }
+
+    if(resize_group(tg, 1, true) != 0) {
+        pthread_mutex_unlock(&tg->mutexGrp);
+        goto error;
+    };
+
+    if(pthread_create(&tt->id, NULL, thread_function, tt) != 0) {
+        pthread_mutex_unlock(&tg->mutexGrp);
+        goto error;
+    }
+
+    tg->tThrd[tg->thrdCount] = tt;
+    tg->thrdCount++;
+    pthread_mutex_unlock(&tg->mutexGrp);
 
     return 0;
+
+error:
+    free(tt);
+    return -1;
 }
 
-static int internal_create_group(KiddiePool *kp, KiddieGroup **kg, unsigned int numthrds, int groupId) {
-    if(kp == NULL) {
+void destroy_thread(TThread *tt) {
+    pthread_mutex_lock(&tt->mutexThrd);
+    tt->state = KILL;
+    pthread_cond_signal(&tt->condThrd);
+    pthread_mutex_unlock(&tt->mutexThrd);
+}
+
+static void internal_destroy_thread(TThread *tt, TGroup *tg) {
+    pthread_mutex_lock(&tg->mutexGrp);
+    tg->thrdCount--;
+    if(resize_group(tg, 1, false)) {
+        /**
+         * @todo    add error handling
+         * @note    error reallocating
+        */
+    }
+    pthread_mutex_unlock(&tg->mutexGrp);
+
+    TPool *tp;
+    tp = tg->pool;
+    pthread_mutex_lock(&tp->mutexPool);
+    tp->totalThrds--;
+    if(resize_pool(tp, 1, false)) {
+        /**
+         * @todo    add error handling
+         * @note    error reallocating
+        */
+    }
+    pthread_mutex_unlock(&tp->mutexPool);
+
+    free(tt);
+}
+
+/**
+ * @note    do not lock a thread that is in the active thread list
+ * @note    only lock a thread that is within the idle thread list
+*/
+static void *thread_function(void *arg) {
+    TGroup *tg;
+    TThread *tt;
+    tt = (TThread *) arg;
+    tg = tt->tg;
+
+    while(1) {
+        struct Node *task;
+
+        pthread_mutex_lock(&tt->mutexThrd);
+        if(tt->task == NULL) {
+            pthread_mutex_lock(&tg->mutexGrp);
+            /**
+             * @todo    can add a check here to see if we are at the min thrd limit and can change the thread flag
+            */
+            if(tg->flag == SOFT_KILL) {
+                tt->state == SOFT_KILL;
+            }
+
+            task = q_fetch(tg->q);
+            
+            if(task == NULL) {
+                tt->state = IDLE;
+                /**
+                 * @todo    add the thread to the idle list
+                */
+            } else {
+                tt->task = task;
+                pthread_mutex_unlock(&tg->mutexGrp);
+                pthread_mutex_unlock(&tt->mutexThrd);
+                goto execute_func;
+            }
+            pthread_mutex_unlock(&tg->mutexGrp);
+        }
+        
+        while(tt->task == NULL && tt->state == IDLE) {            
+            pthread_cond_wait(&tt->condThrd, &tt->mutexThrd);
+        }
+        
+        if(tt->state == SOFT_KILL && task == NULL) {
+            internal_destroy_thread(tt, tg);
+            break;
+        }
+        if(tt->state == KILL) {            
+            internal_destroy_thread(tt, tg);
+            break;                
+        }
+
+        task = tt->task;
+        pthread_mutex_unlock(&tt->mutexThrd);
+
+execute_func:
+        work_func func = task->wf;
+        void *arg = task->work_arg;
+        func(arg);
+        node_kill(task);
+        task = NULL;
+
+        pthread_mutex_lock(&tt->mutexThrd);
+        free(tt->task);
+        tt->task = NULL;
+        pthread_mutex_unlock(&tt->mutexThrd);
+    }
+    pthread_exit(NULL);
+}
+
+static TGroup *internal_create_group(TPool *tp, unsigned int numThrds, unsigned int min, unsigned int max, int groupId) {
+    if(tp == NULL) {
         return -1;
     }
 
-    *kg = (KiddieGroup *)malloc(sizeof(KiddieGroup));
-    if(kg == NULL) {
+    TGroup *tg;
+    tg = (TGroup *)malloc(sizeof(TGroup));
+    if(tg == NULL) {
         return -1;
     }
 
-    (*kg)->threads = (pthread_t *)malloc(numthrds * sizeof(pthread_t));
-	if ((*kg)->threads == NULL){
-		free(kg);
-		return -1;
-	}
-    
+    tg->id = groupId;
+    tg->pool = tp;
+    tg->thrdMin = min;
+    tg->thrdLimit = max;
+
+    tg->thrdCount = 0;
+    tg->tThrdSize = 0;
+    tg->tThrd = NULL;
+
+    if(pthread_mutex_init(&tg->mutexGrp, NULL) != 0) {
+        goto error;
+    }
+
+    if(resize_group(tg, numThrds, true) != 0) {
+        goto error;
+    }
+
     /**
      * @note    queue size can be changed later. Picked random size.
     */
     struct Q *q;
     if(q_init(&q, 1024) != 0) {
-        free((*kg)->threads);
-        free(kg);
-        return -1;
-    };
+        goto error;
+    }
 
-    (*kg)->q = q;
-    (*kg)->id = groupId;
-    (*kg)->kill = 0;
-    (*kg)->pool = kp;
-    (*kg)->thread_count = numthrds;
-    (*kg)->active_threads = 0;
-    pthread_mutex_init(&((*kg)->mutex_kg), NULL);
-    pthread_cond_init(&((*kg)->kill_cond_kg), NULL);
-    pthread_cond_init(&((*kg)->cond_kg), NULL);
-
-    for (size_t i = 0; i < numthrds; i++)
+    for (size_t i = 0; i < numThrds; i++)
     {
-        if(pthread_create(&((*kg)->threads[i]), NULL, thread_function, kg) != 0) {
-            return -1;
+        /**
+         * @note    all the threads should be created or none of them
+         * @todo    error handling needs fixing
+        */
+        if(add_thread(tg) != 0) {
+            goto error;
         }
     }
 
     return 0;
+
+error:
+    free(tg);
+	return -1;
 }
 
-static void internal_destroy_group(KiddieGroup *kg) {
-    size_t total_thread_count;
-
-    pthread_mutex_lock(&(kg->mutex_kg));
-    total_thread_count = kg->thread_count;
-    kg->kill = 1;
-
-    while(kg->thread_count != 0) {
-        pthread_cond_broadcast(&(kg->cond_kg));
-        pthread_cond_wait(&(kg->kill_cond_kg), &(kg->mutex_kg));
-    }
-
-    for (size_t i = 0; i < total_thread_count; i++) {
-        pthread_join(kg->threads[i], NULL);
-    }
-
-    free(kg->threads);
-    kg->threads = NULL;
-
-    q_destroy(&(kg->q));
-
-    pthread_mutex_destroy(&(kg->mutex_kg));
-    pthread_cond_destroy(&(kg->cond_kg));
-    pthread_cond_destroy(&(kg->kill_cond_kg));
-
-    free(kg);
+/**
+ * @todo    this will accpet flags that can either clean the group, kill the group, softkill the group, etc.
+*/
+static void internal_maintenance_group(TGroup *tg, int flag) {
+    
 }
 
-static void *thread_function(void *arg) {
-    KiddieGroup *kg;
-    kg = (KiddieGroup *)arg;
-
-    while(1) {
-        struct Node *node;
-
-        pthread_mutex_lock(&(kg->mutex_kg));    
-        int tasks = q_length(kg->q);
-        while(tasks == 0 && !kg->kill) {
-            pthread_cond_wait(&(kg->cond_kg), &(kg->mutex_kg));
-            tasks = q_length(kg->q);
+/**
+ * @note    this should be called after within limits has been called
+*/
+static int resize_pool(TPool *tp, unsigned int numGrps, bool additional) {
+    unsigned int grpSize = tp->totalGrps;
+    if(additional) {
+        grpSize += numGrps;
+        if(grpSize <= tp->tGrpSize) {
+            return 0;
         }
-
-        if(kg->kill && tasks == 0) {
-            kg->thread_count--;
-            if(kg->thread_count == 0) {
-                pthread_cond_signal(&(kg->kill_cond_kg));
-            }
-            pthread_mutex_unlock(&(kg->mutex_kg));
-            break;
-        }
-        
-        node = q_fetch(kg->q);
-        kg->active_threads++;
-        pthread_mutex_unlock(&(kg->mutex_kg));
-
-        work_func func = node->wf;
-        void *arg = node->work_arg;
-        func(arg);
-        node_kill(node);
-        node = NULL;
-
-        pthread_mutex_lock(&(kg->mutex_kg));
-        kg->active_threads--;
-        pthread_mutex_unlock(&(kg->mutex_kg));
+    } else {
+        grpSize -= numGrps;
     }
 
-    pthread_exit(NULL);
+    tp->tGrp = (TGroup **) realloc(tp->tGrp, grpSize * sizeof(TGroup *));
+    if(tp->tGrp == NULL) {
+        return -1;
+    }
+    
+    tp->tGrpSize = grpSize;
+
+    return 0;
 }
+
+/**
+ * @note    this should be called after within limits has been called
+*/
+static int resize_group(TGroup *tg, unsigned int numThrds, bool additional) {
+    unsigned int newSize;
+    unsigned int thrdSize = tg->thrdCount;
+
+    if(additional) {
+        thrdSize += numThrds;
+        if(thrdSize <= tg->tThrdSize) {
+            return 0;
+        }
+    } else {
+        thrdSize -= numThrds;
+    }
+
+    newSize = resize_factor(thrdSize, tg->tThrdSize, tg->thrdMin, tg->thrdLimit);
+    if(newSize == tg->tThrdSize) {
+        return 0;
+    }
+
+    tg->tThrd = (TThread **) realloc(tg->tThrd, newSize * sizeof(TThread *));
+    if(tg->tThrd == NULL) {
+        return -1;
+    }
+
+    tg->tThrdSize = newSize;
+}
+
+static bool within_limits(unsigned int amnt, unsigned int currSize, unsigned int min, unsigned int max, bool additional) {
+    if(additional) {
+        if(currSize + amnt > max) {
+            return false;
+        }
+    } else {
+        if(currSize - amnt < min) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static unsigned int resize_factor(unsigned int proposedSize, unsigned int currSize, unsigned int lowerLimit, unsigned int upperLimit) {
+    if(proposedSize == currSize) {
+        return currSize;
+    }
+    
+    unsigned int baseLimit = (upperLimit + lowerLimit) / 2;
+    if(currSize == 0 || proposedSize <= baseLimit || proposedSize > upperLimit) {
+        return baseLimit;
+    }
+
+    unsigned int avgSize = currSize;
+    unsigned int prevSize = baseLimit;
+    while(avgSize != prevSize) {
+        if(proposedSize > avgSize) {
+            avgSize = (currSize + upperLimit) / 2;
+        } else {
+            avgSize = (currSize + baseLimit) / 2;
+        }
+    }
+
+    return avgSize;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /*---- Queue ----*/
 static int q_init(struct Q **q, size_t capacity) {
@@ -378,18 +543,21 @@ static void q_append(struct Q *q, struct Node *node) {
 };
 
 static struct Node *q_fetch(struct Q *q) {
-    if(q != NULL || q->head != NULL) {
-        if(q->head == q->tail) {
-            q->tail = NULL;
-        }
-        struct Node *tmp = q->head;
-        q->head = q->head->prev;
-        tmp->prev = NULL;
-        (q->length)--;
-
-        return tmp;
+    if(q_length(q) == 0) {
+        return NULL;
     }
-    return NULL;
+    
+    if(q->head == q->tail) {
+        q->tail = NULL;
+    }
+
+    struct Node *tmp;
+    tmp = q->head;
+    q->head = q->head->prev;
+    tmp->prev = NULL;
+    (q->length)--;
+
+    return tmp;
 };
 
 static int q_length(struct Q *q) {
