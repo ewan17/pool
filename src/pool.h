@@ -1,6 +1,8 @@
-#ifndef KIDDIEPOOL_H
-#define KIDDIEPOOL_H
+#ifndef POOL_H
+#define POOL_H
 
+#include <pthread.h>
+ 
 typedef void (*work_func)(void *work_arg);
 
 #define MAX_THREADS 100
@@ -73,6 +75,4 @@ void destroy_group(TGroup *tg);
 int add_thread(TGroup *tg);
 void destroy_thread(TThread *tt);
 
-
-
-#endif //KIDDIEPOOL_H
+#endif //POOL_H

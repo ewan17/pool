@@ -3,7 +3,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include "kiddiepool.h"
+#include "pool.h"
 
 size_t pool_num_group_helper(int argc, char *argv[]) {
     size_t num_groups;

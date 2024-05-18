@@ -2,8 +2,8 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <stdbool.h>
-#include <pthread.h>
-#include "kiddiepool.h"
+
+#include "pool.h"
 
 struct Node {
     work_func wf;
