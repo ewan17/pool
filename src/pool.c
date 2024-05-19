@@ -5,6 +5,9 @@
 
 #include "pool.h"
 
+#define THREAD_COUNT(tg) (tg->idleThrds.len + tg->activeThrds.len)
+#define GROUP_COUNT(tp) (tp->groups.len)
+
 struct Node {
     work_func wf;
     void *work_arg;
@@ -18,15 +21,13 @@ struct Q {
     size_t capacity;
 };
 
-static int resize_pool(TPool *pool, unsigned int numGrps, bool additional);
-static int resize_group(TGroup *tg, unsigned int numThrds, bool additional);
-static bool within_limits(unsigned int amnt, unsigned int currSize, unsigned int min, unsigned int max, bool additional);
-static unsigned int resize_factor(unsigned int proposedSize, unsigned int currSize, unsigned int lowerLimit, unsigned int upperLimit);
+static bool room_for_more_threads(TGroup *tg);
+static bool room_for_more_groups(TPool *tp);
 
-static void internal_maintenance_group(TGroup *tg, int flag);
 static TGroup *internal_create_group(TPool *kp, unsigned int numthrds, unsigned int min, unsigned int max, int groupId);
 
-static void internal_destroy_thread(TThread *tt, TGroup *tg);
+static void internal_destroy_thread(TThread *tt);
+static void internal_destroy_group(TGroup *tg);
 
 static void *thread_function(void *pool);
 
@@ -39,59 +40,50 @@ static int q_length(struct Q *q);
 
 static void node_kill(struct Node *node);
 
-int init_pool(TPool **pool, unsigned int maxThrds, unsigned int size) {
-    if(pool == NULL) {
+int init_pool(TPool **tp, unsigned int maxThrds, unsigned int size) {
+    if(tp == NULL) {
         return -1;
     }
 
-    *pool = (TPool *)malloc(sizeof(TPool));
-    if(*pool == NULL) {
+    *tp = (TPool *)malloc(sizeof(TPool));
+    if(*tp == NULL) {
         return -1;
     }
 
-    TPool *tp = *pool;
-    bool isDefault = false;
+    (*tp)->thrdMax = (maxThrds > 0 && maxThrds < MAX_THREADS) ? maxThrds : MAX_THREADS;
+    (*tp)->totalThrds = 0;
 
-    tp->maxThrds = (maxThrds > 0 && maxThrds < MAX_THREADS) ? maxThrds : MAX_THREADS;
-    tp->totalThrds = 0;
-    tp->totalGrps = 0;
-    tp->tGrp = NULL;
-    pthread_mutex_init(&tp->mutexPool, NULL);
+    init_list(&(*tp)->groups);
 
-    if(resize_pool(tp, size, true) != 0) {
-		free(tp);
-        tp = NULL;
-        return -1;
-    }
+    pthread_mutex_init(&(*tp)->mutexPool, NULL);
     
     return 0;
 }
 
 /**
+ * @note    the limit of threads for all groups should not exceed the max
+ * @todo    add a check to make sure the numthrds is within thrdMax - totaLThrds
  * @note    currently we have no limit on the number of threads and groups
  * @todo    will need to add limit checks later
 */
-TGroup *add_group(TPool *pool, int id, unsigned int numthrds, unsigned int min, unsigned int max) {
+TGroup *add_group(TPool *tp, int id, unsigned int numthrds, unsigned int min, unsigned int max) {
     TGroup *tg;
 
-    pthread_mutex_lock(&pool->mutexPool);
-    if(resize_pool(pool, 1, true) != 0) {
-        pthread_mutex_unlock(&pool->mutexPool);
+    pthread_mutex_lock(&tp->mutexPool);
+    if(!room_for_more_groups(tp)) {
+        pthread_mutex_unlock(&tp->mutexPool);
         return -1;
     }
-    pthread_mutex_unlock(&pool->mutexPool);
+    pthread_mutex_unlock(&tp->mutexPool);
 
-    tg = internal_create_group(pool, numthrds, min, max, id);
+    tg = internal_create_group(tp, numthrds, min, max, id);
     if(tg == NULL) {
         return -1;
     }
 
-    pthread_mutex_lock(&pool->mutexPool);
-    unsigned int index = pool->totalGrps;
-    pool->totalGrps++;
-    pool->totalThrds += numthrds;
-    pool->tGrp[index] = tg;
-    pthread_mutex_unlock(&pool->mutexPool);
+    pthread_mutex_lock(&tp->mutexPool);
+    list_append(&tp->groups, &tg->move);
+    pthread_mutex_unlock(&tp->mutexPool);
 
     return tg;
 }
@@ -104,7 +96,17 @@ void destroy_group(TGroup *tg) {
         return;
     }
 
-    internal_maintenance_group(tg, SOFT_KILL);
+    TPool *tp;
+    tp = tg->pool;
+
+    pthread_mutex_lock(&tg->mutexGrp);
+    tg->flags |= (CLOSED | TERMINATE);
+    pthread_mutex_unlock(&tg->mutexGrp);
+
+    pthread_mutex_lock(&tp->mutexPool);
+    pthread_cond_signal(&tp->condPool);
+    pthread_mutex_unlock(&tp->mutexPool);
+
 }
 
 int add_work(TGroup *tg, work_func wf, void *work_arg) {
@@ -113,8 +115,14 @@ int add_work(TGroup *tg, work_func wf, void *work_arg) {
     }
 
     TThread *tt;
-
     struct Node *task;
+
+    pthread_mutex_lock(&tg->mutexGrp);
+    if(tg->flags & CLOSED) {
+        pthread_mutex_unlock(&tg->mutexGrp);
+        return -1;
+    }
+
     task = (struct Node *)malloc(sizeof(struct Node));
     if(task == NULL) {
         return -1;
@@ -123,24 +131,24 @@ int add_work(TGroup *tg, work_func wf, void *work_arg) {
     task->work_arg = work_arg;
     task->prev = NULL;
 
-    pthread_mutex_lock(&tg->mutexGrp);
-    /**
-     * @todo    check the idle list for a thread
-    */
-    if(tt != NULL) {
-        /**
-         * @todo    move thread into the active threads
-        */
-    } else {
+    if(is_empty(&tg->idleThrds)) {
         // currently there are no idle threads
         q_append(tg->q, task);
         pthread_mutex_unlock(&tg->mutexGrp);
         return 0;
+    } else {
+        struct IL *il;
+        // remove thread from idle list
+        il = list_pop(&tg->idleThrds);
+
+        tt = CONTAINER_OF(il, TThread, move);
+        // add thread to active list
+        list_append(&tg->activeThrds, il);
     }
     pthread_mutex_unlock(&tg->mutexGrp);
 
     pthread_mutex_lock(&tt->mutexThrd);
-    tt->task = tt;
+    tt->task = task;
     tt->state = RUNNING;
     pthread_cond_signal(&tt->condThrd);
     pthread_mutex_unlock(&tt->mutexThrd);
@@ -151,20 +159,45 @@ int add_work(TGroup *tg, work_func wf, void *work_arg) {
 /**
  * @todo    needs fixing with all the other destory methods
 */
-void destroy_pool(TPool *pool) {
-    if(pool != NULL) {
+void destroy_pool(TPool *tp) {
+    if(tp != NULL) {
         return;
     }
     
-    pthread_mutex_lock(&(pool->mutexPool));
-    
-    pthread_mutex_destroy(&(pool->mutexPool));
+    pthread_mutex_lock(&tp->mutexPool);
+    /**
+     * @todo    close the manager thread
+    */
+    struct IL *curr;
+    for_each(&tp->groups.head, curr) {
+        TGroup *tg;
+        tg = CONTAINER_OF(curr, TGroup, move);
+        destroy_group(tg);
+    }
 
-    free(pool);
+    /**
+     * @note    this seems sus
+     * @todo    maybe use the signal instead
+    */
+    while(tp->totalThrds != 0) {
+        pthread_cond_wait(&tp->condPool, &tp->mutexPool);
+    }
+
+    pthread_cond_destroy(&tp->condPool);
+
+    pthread_mutex_destroy(&tp->mutexPool);
+
+    free(tp);
 }
 
 int add_thread(TGroup *tg) {
+    if(tg == NULL) {
+        return -1;
+    }
+
     TThread *tt;
+    TPool *tp;
+    tp = tg->pool;
 
     tt = (TThread *)malloc(sizeof(TThread));
     if(tt == NULL) {
@@ -174,6 +207,8 @@ int add_thread(TGroup *tg) {
     tt->state = RUNNING;
     tt->tg = tg;
     tt->task = NULL;
+
+    init_il(&tt->move);
 
     if(pthread_mutex_init(&tt->mutexThrd, NULL)) {
         goto error;
@@ -187,23 +222,18 @@ int add_thread(TGroup *tg) {
      * @todo    add limit error on the number of threads that can be added to the group
     */
     pthread_mutex_lock(&tg->mutexGrp);
-    if(!within_limits(1, tg->tThrdSize, tg->thrdMin, tg->thrdLimit, true)) {
-        goto error;
-    }
-
-    if(resize_group(tg, 1, true) != 0) {
+    if(!room_for_more_threads(tg)) {
         pthread_mutex_unlock(&tg->mutexGrp);
         goto error;
-    };
+    }
 
     if(pthread_create(&tt->id, NULL, thread_function, tt) != 0) {
         pthread_mutex_unlock(&tg->mutexGrp);
         goto error;
     }
-
-    tg->tThrd[tg->thrdCount] = tt;
-    tg->thrdCount++;
     pthread_mutex_unlock(&tg->mutexGrp);
+
+    tp->totalThrds++;
 
     return 0;
 
@@ -214,35 +244,51 @@ error:
 
 void destroy_thread(TThread *tt) {
     pthread_mutex_lock(&tt->mutexThrd);
-    tt->state = KILL;
+    tt->state = HARD_KILL;
     pthread_cond_signal(&tt->condThrd);
     pthread_mutex_unlock(&tt->mutexThrd);
 }
 
-static void internal_destroy_thread(TThread *tt, TGroup *tg) {
-    pthread_mutex_lock(&tg->mutexGrp);
-    tg->thrdCount--;
-    if(resize_group(tg, 1, false)) {
-        /**
-         * @todo    add error handling
-         * @note    error reallocating
-        */
-    }
-    pthread_mutex_unlock(&tg->mutexGrp);
+/**
+ * @note    the thread should also be locked before calling this function
+ * @note    function should only be called on a thread that is in the idle thread list
+*/
+static void internal_destroy_thread(TThread *tt) {
+    TGroup *tg;
+    tg = tt->tg;
 
-    TPool *tp;
-    tp = tg->pool;
-    pthread_mutex_lock(&tp->mutexPool);
-    tp->totalThrds--;
-    if(resize_pool(tp, 1, false)) {
-        /**
-         * @todo    add error handling
-         * @note    error reallocating
-        */
-    }
-    pthread_mutex_unlock(&tp->mutexPool);
+    item_remove(&tt->move);
+    pthread_mutex_destroy(&tt->mutexThrd);
+    pthread_cond_destroy(&tt->condThrd);
 
     free(tt);
+
+    tg->pool->totalThrds--;
+
+    pthread_mutex_lock(&tg->mutexGrp);
+    tg->idleThrds.len--;
+
+    if(THREAD_COUNT(tg) == 0) {
+        // no more threads in the group, destroy it
+        internal_destroy_group(tg);
+    }
+    pthread_mutex_unlock(&tg->mutexGrp);
+}
+
+/**
+ * @note    the group should already be locked before calling this function
+*/
+static void internal_destroy_group(TGroup *tg) {
+    TPool *tp;
+    tp = tg->pool;
+
+    item_remove(&tg->move);
+    pthread_mutex_destroy(&tg->mutexGrp);
+    q_destroy(&tg->q);
+
+    pthread_mutex_lock(&tp->mutexPool);
+    tp->groups.len--;
+    pthread_mutex_unlock(&tp->mutexPool);
 }
 
 /**
@@ -261,20 +307,25 @@ static void *thread_function(void *arg) {
         pthread_mutex_lock(&tt->mutexThrd);
         if(tt->task == NULL) {
             pthread_mutex_lock(&tg->mutexGrp);
-            /**
-             * @todo    can add a check here to see if we are at the min thrd limit and can change the thread flag
-            */
-            if(tg->flag == SOFT_KILL) {
-                tt->state == SOFT_KILL;
+
+            if(tg->flags & TERMINATE) {
+                pthread_mutex_unlock(&tg->mutexGrp);
+                break;
+            }
+            
+            if(tg->flags & CLEAN) {
+                tt->state = (THREAD_COUNT(tg) == tg->thrdMin) ? RUNNING : SOFT_KILL;
             }
 
             task = q_fetch(tg->q);
             
             if(task == NULL) {
+                struct IL *il;
+                item_remove(&tt->move);
+                tg->activeThrds.len--;
+
+                list_append(&tg->idleThrds, &tt->move);
                 tt->state = IDLE;
-                /**
-                 * @todo    add the thread to the idle list
-                */
             } else {
                 tt->task = task;
                 pthread_mutex_unlock(&tg->mutexGrp);
@@ -289,12 +340,10 @@ static void *thread_function(void *arg) {
         }
         
         if(tt->state == SOFT_KILL && task == NULL) {
-            internal_destroy_thread(tt, tg);
             break;
         }
-        if(tt->state == KILL) {            
-            internal_destroy_thread(tt, tg);
-            break;                
+        if(tt->state == HARD_KILL) {
+            break;
         }
 
         task = tt->task;
@@ -312,6 +361,8 @@ execute_func:
         tt->task = NULL;
         pthread_mutex_unlock(&tt->mutexThrd);
     }
+
+    internal_destroy_thread(tt);
     pthread_exit(NULL);
 }
 
@@ -328,12 +379,11 @@ static TGroup *internal_create_group(TPool *tp, unsigned int numThrds, unsigned 
 
     tg->id = groupId;
     tg->pool = tp;
-    tg->thrdMin = min;
-    tg->thrdLimit = max;
 
-    tg->thrdCount = 0;
-    tg->tThrdSize = 0;
-    tg->tThrd = NULL;
+    init_il(&tg->move);
+
+    init_list(&tg->idleThrds);
+    init_list(&tg->activeThrds);
 
     if(pthread_mutex_init(&tg->mutexGrp, NULL) != 0) {
         goto error;
@@ -369,127 +419,13 @@ error:
 	return -1;
 }
 
-/**
- * @todo    this will accpet flags that can either clean the group, kill the group, softkill the group, etc.
-*/
-static void internal_maintenance_group(TGroup *tg, int flag) {
-    
+static bool room_for_more_threads(TGroup *tg) {
+    return THREAD_COUNT(tg) <= tg->thrdMin && THREAD_COUNT(tg) >= tg->thrdMax;
 }
 
-/**
- * @note    this should be called after within limits has been called
-*/
-static int resize_pool(TPool *tp, unsigned int numGrps, bool additional) {
-    unsigned int grpSize = tp->totalGrps;
-    if(additional) {
-        grpSize += numGrps;
-        if(grpSize <= tp->tGrpSize) {
-            return 0;
-        }
-    } else {
-        grpSize -= numGrps;
-    }
-
-    tp->tGrp = (TGroup **) realloc(tp->tGrp, grpSize * sizeof(TGroup *));
-    if(tp->tGrp == NULL) {
-        return -1;
-    }
-    
-    tp->tGrpSize = grpSize;
-
-    return 0;
+static bool room_for_more_groups(TPool *tp) {
+    return GROUP_COUNT(tp) >= tp->groupMax;
 }
-
-/**
- * @note    this should be called after within limits has been called
-*/
-static int resize_group(TGroup *tg, unsigned int numThrds, bool additional) {
-    unsigned int newSize;
-    unsigned int thrdSize = tg->thrdCount;
-
-    if(additional) {
-        thrdSize += numThrds;
-        if(thrdSize <= tg->tThrdSize) {
-            return 0;
-        }
-    } else {
-        thrdSize -= numThrds;
-    }
-
-    newSize = resize_factor(thrdSize, tg->tThrdSize, tg->thrdMin, tg->thrdLimit);
-    if(newSize == tg->tThrdSize) {
-        return 0;
-    }
-
-    tg->tThrd = (TThread **) realloc(tg->tThrd, newSize * sizeof(TThread *));
-    if(tg->tThrd == NULL) {
-        return -1;
-    }
-
-    tg->tThrdSize = newSize;
-}
-
-static bool within_limits(unsigned int amnt, unsigned int currSize, unsigned int min, unsigned int max, bool additional) {
-    if(additional) {
-        if(currSize + amnt > max) {
-            return false;
-        }
-    } else {
-        if(currSize - amnt < min) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static unsigned int resize_factor(unsigned int proposedSize, unsigned int currSize, unsigned int lowerLimit, unsigned int upperLimit) {
-    if(proposedSize == currSize) {
-        return currSize;
-    }
-    
-    unsigned int baseLimit = (upperLimit + lowerLimit) / 2;
-    if(currSize == 0 || proposedSize <= baseLimit || proposedSize > upperLimit) {
-        return baseLimit;
-    }
-
-    unsigned int avgSize = currSize;
-    unsigned int prevSize = baseLimit;
-    while(avgSize != prevSize) {
-        if(proposedSize > avgSize) {
-            avgSize = (currSize + upperLimit) / 2;
-        } else {
-            avgSize = (currSize + baseLimit) / 2;
-        }
-    }
-
-    return avgSize;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /*---- Queue ----*/
 static int q_init(struct Q **q, size_t capacity) {

@@ -2,26 +2,44 @@
 #define POOL_H
 
 #include <pthread.h>
+#include "il.h"
+
+#if __STDC_VERSION__ < 201112L || __STDC_NO_ATOMICS__ == 1
+/**
+ * @todo    add some sort of implementation here if atomics is not supported
+*/
+#else
+#include <stdatomic.h>
+#endif
  
 typedef void (*work_func)(void *work_arg);
 
 #define MAX_THREADS 100
 
-#define DEFAULT_NUM_GROUPS 16
-#define DEFAULT_THREADS_PER_GROUP 2 
+#define DYNAMIC 0x01
+#define FIXED 0x02
+#define CLOSED 0x08
+#define CLEAN 0x10
+#define TERMINATE 0x20
 
-#define RUNNING 0x01
-#define IDLE 0x02
-#define SOFT_KILL 0x03
-#define KILL 0x03
+struct Node Node;
+
+typedef enum {
+    RUNNING = 0x01,
+    IDLE = 0x02,
+    SOFT_KILL = 0x04,
+    HARD_KILL = 0x08
+} State;
 
 typedef struct TThread {
+    struct IL move;
+
     pthread_t id;
 
     pthread_mutex_t mutexThrd;
     pthread_cond_t condThrd;
 
-    volatile int state;
+    volatile State state;
 
     struct Node *task;
 
@@ -29,19 +47,20 @@ typedef struct TThread {
 } TThread;
 
 typedef struct TGroup {
+    struct IL move;
+
     int id;
     
     pthread_mutex_t mutexGrp;
 
-    volatile int flag;
+    volatile int flags;
 
     struct Q *q;
 
-    TThread **tThrd;
-    volatile unsigned int thrdCount;
-    volatile unsigned int tThrdSize;
+    LL idleThrds;
+    LL activeThrds;
 
-    unsigned int thrdLimit;
+    unsigned int thrdMax;
     unsigned int thrdMin;
 
     TPool *pool;
@@ -49,22 +68,21 @@ typedef struct TGroup {
 
 typedef struct TPool {
     pthread_mutex_t mutexPool;
+    pthread_cond_t condPool;
 
-    volatile unsigned int totalThrds;
-    volatile unsigned int totalGrps;
+    atomic_int totalThrds;
+    unsigned int thrdMax;
+    unsigned int groupMax;
 
-    unsigned int maxThrds;
+    LL groups;
 
-    TGroup **tGrp;
-    volatile unsigned int tGrpSize;
-
-    TThread *manager;
+    pthread_t *manager;
 } TPool;
  
-int init_pool(TPool **pool, unsigned int maxThrds, unsigned int size);
-void destroy_pool(TPool *pool);
+int init_pool(TPool **tp, unsigned int maxThrds, unsigned int size);
+void destroy_pool(TPool *tp);
 
-TGroup *add_group(TPool *pool, int id, unsigned int numThrds, unsigned int min, unsigned int max);
+TGroup *add_group(TPool *tp, int id, unsigned int numThrds, unsigned int min, unsigned int max);
 int add_work(TGroup *tg, work_func wf, void *work_arg);
 
 /**
@@ -73,6 +91,6 @@ int add_work(TGroup *tg, work_func wf, void *work_arg);
 void destroy_group(TGroup *tg);
 
 int add_thread(TGroup *tg);
-void destroy_thread(TThread *tt);
+void destroy_thread(TThread *tt);    
 
 #endif //POOL_H
