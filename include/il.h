@@ -4,17 +4,17 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-struct IL {
+typedef struct IL {
     struct IL *next;
     struct IL *prev;
 } IL;
 
 typedef struct LL {
-    struct IL head;
+    IL head;
     size_t len;
 } LL;
 
-static inline void init_il(struct IL *il) {
+static inline void init_il(IL *il) {
     il->next = il->prev = il;
 }
 
@@ -24,31 +24,23 @@ static inline void init_list(LL *list) {
     list->len = 0;
 }
 
-static inline void list_append(LL *list, struct IL *item) {
-    item_append(&list->head, item);
-    list->len++;
+static inline int empty(LL *list) {
+    return list->len == 0;
 }
 
-static inline struct IL *list_pop(LL *list) {
-    if(list->len == 0) {
-        return NULL;
-    }
-
-    struct IL *rc;
-    rc = item_remove(&list->head);
-    list->len--;
-
-    return rc;
-}
-
-static inline void item_append(struct IL *item1, struct IL *item2) {
+static inline void item_append(IL *item1, IL *item2) {
     item1->prev->next = item2;
     item2->prev = item1->prev;
     item1->prev = item2;
     item2->next = item1;
 }
 
-static inline struct IL *item_remove(struct IL *item) {
+static inline void list_append(LL *list, struct IL *item) {
+    item_append(&list->head, item);
+    list->len++;
+}
+
+static inline IL *item_remove(IL *item) {
     item->prev->next = item->next;
     item->next->prev = item->prev;
 
@@ -57,8 +49,16 @@ static inline struct IL *item_remove(struct IL *item) {
     return item;
 }
 
-static inline bool is_empty(LL *list) {
-    return list->len == 0;
+static inline IL *list_pop(LL *list) {
+    if(empty(list)) {
+        return NULL;
+    }
+
+    IL *rc;
+    rc = item_remove(list->head.next);
+    list->len--;
+
+    return rc;
 }
 
 #define INIT_LIST(list) \

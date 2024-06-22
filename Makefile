@@ -1,26 +1,36 @@
 CC	= gcc
 W = -W -Wall -g
-CFLAGS = $(W)
-TESTS = testkiddie testmem testwork
+INCLUDE = include
+CFLAGS = $(W) $(addprefix -I, $(INCLUDE))
 
+BIN = bin
+
+TESTS = testpool
+
+.PHONY: clean bench
 
 clean:
-	rm -rf $(TESTS) *.[ao] *.[ls]o
+	rm -rf $(BIN) $(TESTS) *.[ao] *.[ls]o
 
 test:	$(TESTS)
 
-testwork: testwork.o	kiddie.a
-testmem: testmem.o	kiddie.a
-testkiddie:	testkiddie.o	kiddie.a
+testpool: testpool.o	pool.a
+	@mkdir -p $(BIN)
+	$(CC) $(CFLAGS) -o $(BIN)/$@ $^
+	chmod +x ./test/val.sh
+	./test/val.sh $(BIN)/$@
 
-%:	%.o
-	$(CC) $(CFLAGS) $^ -o $@
+bench:
+	@echo "bench mark"
 
-%.o:	%.c kiddiepool.h
+%.o:	src/%.c
+	$(CC) $(CFLAGS) -c $<
+
+%.o:	test/%.c
+	$(CC) $(CFLAGS) -c $<
+
+pool.a:	pool.o
+	$(AR) rs $@ pool.o
+
+pool.o: src/pool.c
 	$(CC) $(CFLAGS) -c $< 
-
-kiddie.a:	kiddiepool.o
-	$(AR) rs $@ kiddiepool.o
-
-kiddiepool.o: kiddiepool.c kiddiepool.h
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c kiddiepool.c
