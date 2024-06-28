@@ -112,22 +112,29 @@ static void q_destroy(struct Q **q);
 static void q_append(struct Q *q, Work *node);
 static Work *q_fetch(struct Q *q);
 static size_t q_length(struct Q *q);
+static int q_full(struct Q *q);
+static int q_empty(struct Q *q);
 
 /**
+ * Initializes the pool that will hold groups.
+ * Each group will hold the tasks within a queue and will be assigned a certain number of threads.
+ * The pool will have a manager thread that works on a timedwait that will be woken up to add or delete threads depending on work load.
  * 
+ * @param   tp          double pointer to pool struct for internal memory allocation
+ * @param   maxThrds    the maximum number of threads that this pool can hold
  */
 int init_pool(TPool **tp, unsigned int maxThrds) {    
     if(tp == NULL) {
-        return -1;
+        return POOL_ERROR;
     }
 
     *tp = (TPool *)malloc(sizeof(TPool));
     if(*tp == NULL) {
-        return -1;
+        return POOL_ERROR;
     }
 
     if(maxThrds == 0) {
-        return -1;
+        return POOL_ERROR;
     }
     (*tp)->thrdMax = maxThrds;
     (*tp)->totalThrds = 0;
@@ -143,9 +150,15 @@ int init_pool(TPool **tp, unsigned int maxThrds) {
     pthread_mutex_init(&(*tp)->mutexPool, NULL);
     pthread_cond_init(&(*tp)->condPool, NULL);
     
-    return 0;
+    return POOL_SUCCESS;
 }
 
+/**
+ * Destroys a pool.
+ * Will destroy all groups and all threads within a group.
+ * 
+ * @param   tp      pool struct
+ */
 void destroy_pool(TPool *tp) {
     if(tp == NULL) {
         return;
@@ -156,6 +169,9 @@ void destroy_pool(TPool *tp) {
     while((curr = list_pop(&tp->groups)) != NULL) {
         TGroup *tg = CONTAINER_OF(curr, TGroup, move);
         internal_destroy_group(tg);
+
+        tp->totalThrds -= tg->thrdMax;
+
         free(tg);
     }
     pthread_mutex_unlock(&tp->mutexPool);
@@ -174,7 +190,12 @@ void destroy_pool(TPool *tp) {
 }
 
 /**
+ * Adds a group to a pool.
  * 
+ * @param   tp      pool struct
+ * @param   min     lower limit for threads in this group
+ * @param   max     upper limit for threads in this group
+ * @param   flags   flag options are DYNAMIC AND FIXED
 */
 TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags) {
     TGroup *tg;
@@ -259,7 +280,10 @@ error:
 }
 
 /**
+ * Destroys and frees all the threads within the group.
+ * The group is freed.
  * 
+ * @param   tg      group struct
  */
 void destroy_group(TGroup *tg) {
     if(tg == NULL) {
@@ -281,6 +305,8 @@ void destroy_group(TGroup *tg) {
 
 /**
  * Initialize a work struct before adding work to it.
+ * 
+ * @param   work    double pointer to the work struct for internal mem allocation
  */
 void init_work(Work **work) {
     if(work == NULL) {
@@ -288,13 +314,15 @@ void init_work(Work **work) {
     }
 
     *work = (Work *)malloc(sizeof(Work));
-    if(*work == NULL) {
-        assert(0);
-    }
+    assert(*work != NULL);
 }
 
 /**
  * Accepts a void function and a void arg.
+ * 
+ * @param   work    work struct
+ * @param   func    the func that will be called in the thread function
+ * @param   arg     the arg passed into the func
  */
 void add_work(Work *work, work_func func, void *arg) {
     work->wf = func;
@@ -305,18 +333,24 @@ void add_work(Work *work, work_func func, void *arg) {
 /**
  * Assign the work to a specific group.
  * Do the work.
+ * 
+ * @param   tg      group struct
+ * @param   work    work struct that is populated from the add_work()
  */
 int do_work(TGroup *tg, Work *work) {
     if(work == NULL || tg == NULL) {
-        return -1;
+        return POOL_ERROR;
     }
 
     TThread *tt;
+    TPool *tp = tg->pool;
+    int rc;
+    int condSig;
 
     pthread_mutex_lock(&tg->mutexGrp);
     if(tg->flags & GROUP_CLOSE) {
         pthread_mutex_unlock(&tg->mutexGrp);
-        return -1;
+        return POOL_ERROR;
     }
 
     // remove thread from idle list
@@ -324,9 +358,27 @@ int do_work(TGroup *tg, Work *work) {
     if(il == NULL) {
         // currently there are no idle threads
         // add work and return
-        q_append(tg->q, work);
-        pthread_mutex_unlock(&tg->mutexGrp);
-        return 0;
+        if(q_full(tg->q)) {
+            // storing condsig in another variable outside of the lock will not lead to consistent results.
+            // the numThrds may change immediately after we unlock the group.
+            // I do this because I would rather signal to the manager thread that the queue is full even when it may not be,
+                // rather than wait for the the timedwait to ETIMEOUT
+            condSig = (tg->numThrds == tg->thrdMax - 1);
+            pthread_mutex_unlock(&tg->mutexGrp);
+
+            // signal to the manager thread that we need to activate all threads since queue is full
+            if(condSig) {
+                pthread_mutex_lock(&tp->mutexPool);
+                pthread_cond_signal(&tp->condPool);
+                pthread_mutex_unlock(&tp->mutexPool);
+            }
+            rc = GROUP_FULL;
+        } else {
+            q_append(tg->q, work);
+            pthread_mutex_unlock(&tg->mutexGrp);
+            rc = POOL_SUCCESS;
+        }
+        return rc;
     }
 
     tt = CONTAINER_OF(il, TThread, move);
@@ -340,7 +392,7 @@ int do_work(TGroup *tg, Work *work) {
     pthread_cond_signal(&tt->condThrd);
     pthread_mutex_unlock(&tt->mutexThrd);
 
-    return 0;
+    return POOL_SUCCESS;
 }
 
 /*  --Internal Functions--  */
@@ -351,15 +403,12 @@ int do_work(TGroup *tg, Work *work) {
  */
 static int internal_add_thread(TGroup *tg) {
     if(tg == NULL) {
-        return -1;
+        return POOL_ERROR;
     }
 
     TThread *tt;
-
     tt = (TThread *)malloc(sizeof(TThread));
-    if(tt == NULL) {
-        return -1;
-    }
+    assert(tt != NULL);
 
     tt->state = running;
     tt->tg = tg;
@@ -377,7 +426,7 @@ static int internal_add_thread(TGroup *tg) {
      * @todo    add limit error on the number of threads that can be added to the group
     */
     pthread_mutex_lock(&tg->mutexGrp);
-    if(tg->numThrds == tg->thrdMax) {
+    if(tg->numThrds == tg->thrdMax - 1) {
         pthread_mutex_unlock(&tg->mutexGrp);
         goto error;
     }
@@ -392,11 +441,11 @@ static int internal_add_thread(TGroup *tg) {
     tg->numThrds++;
     pthread_mutex_unlock(&tg->mutexGrp);
 
-    return 0;
+    return POOL_SUCCESS;
 
 error:
     free(tt);
-    return -1;
+    return POOL_ERROR;
 }
 
 /**
@@ -407,9 +456,15 @@ error:
  * @todo    add the functionality to determine the groups health relative to work load
  */
 static Health internal_health_check(TGroup *tg) {
-    size_t amntWork; 
-    amntWork = q_length(tg->q);
-    return well;
+    if(q_full(tg->q)) {
+        return poor;
+    }
+
+    if(q_empty(tg->q)) {
+        return well;
+    }
+
+    return moderate;
 }
 
 /**
@@ -421,8 +476,6 @@ static Health internal_health_check(TGroup *tg) {
  * @note    this will not free the group
  */
 static void internal_destroy_group(TGroup *tg) {
-    TPool *tp = tg->pool;
-
     pthread_t *threads;
     size_t numThrds = 0;
 
@@ -462,10 +515,11 @@ static void internal_destroy_group(TGroup *tg) {
  * Called whenever a thread in the worker function breaks from the while loop.
  * Remove the thread from the group list.
  * Update the number of total thrds that the pool has.
+ * 
+ * @note    the calling function needs to reduce the number of threads in the pool struct
 */
 static void internal_destroy_thread(TThread *tt) {
     TGroup *tg = tt->tg;
-    TPool *tp = tg->pool;
 
     pthread_mutex_lock(&tg->mutexGrp);
     item_remove(&tt->move);
@@ -482,10 +536,6 @@ static void internal_destroy_thread(TThread *tt) {
     pthread_mutex_destroy(&tt->mutexThrd);
 
     free(tt);
-
-    pthread_mutex_lock(&tp->mutexPool);
-    tp->totalThrds--;
-    pthread_mutex_unlock(&tp->mutexPool);
 }
 
 /**
@@ -513,7 +563,7 @@ top:
             void *arg = task->work_arg;
             func(arg);
 
-            // we do not unlock this since after we free the task we grab more tasks
+            // we do not unlock this because after we free the task we grab more tasks
             pthread_mutex_lock(&tt->mutexThrd);
             free(tt->currTask);
             tt->currTask = NULL;
@@ -566,7 +616,7 @@ top:
 
     pthread_mutex_unlock(&tt->mutexThrd);
     internal_destroy_thread(tt);
-    return;
+    return NULL;
 }
 
 /**
@@ -627,8 +677,7 @@ static void *manager_thread_function(void *arg) {
     }
     pthread_mutex_unlock(&tp->mutexPool);
 
-    pthread_exit(NULL);
-    return;
+    return NULL;
 }
 
 /*  --Queue--   */
@@ -696,4 +745,12 @@ static Work *q_fetch(struct Q *q) {
 
 static size_t q_length(struct Q *q) {
     return q->length;
+}
+
+static int q_full(struct Q *q) {
+    return (q->length == q->capacity - 1);
+}
+
+static int q_empty(struct Q *q) {
+    return (q->length == 0);
 }

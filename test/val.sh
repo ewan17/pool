@@ -4,7 +4,7 @@
 # valgrind='valgrind --tool=helgrind'
 valgrind='valgrind --tool=memcheck --leak-check=yes --show-leak-kinds=all'
 
-logfile="testy.log"
+logfile="test.log"
 
 run_valgrind() {
     local executable="$1"

@@ -1,6 +1,7 @@
 # Dynamic Thread Pool in C
 
 ## Overview
+This project is not production ready.
 
 This project implements a dynamic thread pool in C that manages multiple groups of threads. Each group contains a specified range of threads, and the pool oversees all groups collectively. The thread pool allows the creation and destruction of threads dynamically and includes a timer-based manager thread to handle periodic tasks.
 
@@ -19,3 +20,5 @@ The thread pool is provided as a precompiled static library (`threadpool.a`). To
    Example:
    ```bash
    gcc -o example example.c -L/path/to/threadpool -lthreadpool -pthread
+
+## Bench
