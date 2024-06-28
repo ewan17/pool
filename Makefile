@@ -24,7 +24,7 @@ bin:
 
 test:	bin	$(TESTS)
 
-testpool: testpool.o	$(TARGET)
+testpool:	testpool.o	$(TARGET)
 	$(CC) $(CFLAGS) -o $(BIN)/$@ $(BIN)/$^
 	chmod +x ./test/val.sh
 	./test/val.sh $(BIN)/$@

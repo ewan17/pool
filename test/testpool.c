@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "pool.h"
 
 static TPool *init_test(unsigned int thrds);

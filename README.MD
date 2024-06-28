@@ -6,7 +6,7 @@ This project implements a dynamic thread pool in C that manages multiple groups 
 
 ## Precompiled Library
 
-The thread pool is provided as a precompiled static library (`libthreadpool.a`). To integrate it into your project:
+The thread pool is provided as a precompiled static library (`threadpool.a`). To integrate it into your project:
 
 1. **Compile the Library**: First, compile the provided source files into the static library using `make`.
 
@@ -14,7 +14,7 @@ The thread pool is provided as a precompiled static library (`libthreadpool.a`).
    ```bash
    make
 
-2. **Linking**: Include `libthreadpool.a` in your linker command.
+2. **Linking**: Include `threadpool.a` in your linker command.
    
    Example:
    ```bash

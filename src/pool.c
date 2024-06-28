@@ -11,6 +11,8 @@
 #include "pool.h"
 #include "il.h"
 
+#define Q_SIZE_MULT 2
+
 #define GROUP_CLOSE 0x04
 #define GROUP_CLEAN 0x08
 #define SOFT_KILL 0x10
@@ -52,7 +54,7 @@ struct TPool {
     LL groups;
 
     // manager thread for the pool to be dynamic
-    pthread_t *manager;
+    pthread_t manager;
 };
 
 struct TGroup {
@@ -97,7 +99,7 @@ typedef struct TThread {
 
 /*  --Internal Functions--  */
 static int internal_add_thread(TGroup *tg);
-static enum Health health_check(TGroup *tg);
+static Health internal_health_check(TGroup *tg);
 
 static void internal_destroy_group(TGroup *tg);
 static void internal_destroy_thread(TThread *tt);
@@ -109,11 +111,12 @@ static int q_init(struct Q **q, size_t capacity);
 static void q_destroy(struct Q **q);
 static void q_append(struct Q *q, Work *node);
 static Work *q_fetch(struct Q *q);
-static int q_length(struct Q *q);
+static size_t q_length(struct Q *q);
 
-int init_pool(TPool **tp, unsigned int maxThrds) {
-    int rc;
-    
+/**
+ * 
+ */
+int init_pool(TPool **tp, unsigned int maxThrds) {    
     if(tp == NULL) {
         return -1;
     }
@@ -131,8 +134,11 @@ int init_pool(TPool **tp, unsigned int maxThrds) {
 
     init_list(&(*tp)->groups);
 
-    rc = pthread_create(&(*tp)->manager, NULL, manager_thread_function, NULL);
-    assert(rc == 0);
+    /**
+     * @todo    uncomment this when the manager thread is ready
+     */
+    // rc = pthread_create(&(*tp)->manager, NULL, manager_thread_function, NULL);
+    // assert(rc == 0);
 
     pthread_mutex_init(&(*tp)->mutexPool, NULL);
     pthread_cond_init(&(*tp)->condPool, NULL);
@@ -146,9 +152,6 @@ void destroy_pool(TPool *tp) {
     }
     
     pthread_mutex_lock(&tp->mutexPool);
-    /**
-     * @todo    close the manager thread
-    */
     IL *curr;
     while((curr = list_pop(&tp->groups)) != NULL) {
         TGroup *tg = CONTAINER_OF(curr, TGroup, move);
@@ -156,6 +159,14 @@ void destroy_pool(TPool *tp) {
         free(tg);
     }
     pthread_mutex_unlock(&tp->mutexPool);
+
+    /**
+     * @todo    uncomment this when the manager thread is ready
+     */
+    // if(pthread_join(tp->manager, NULL) != 0) {
+    //     assert(0);
+    // }
+
     pthread_cond_destroy(&tp->condPool);
     pthread_mutex_destroy(&tp->mutexPool);
 
@@ -163,10 +174,7 @@ void destroy_pool(TPool *tp) {
 }
 
 /**
- * @note    the limit of threads for all groups should not exceed the max
- * @todo    add a check to make sure the numthrds is within thrdMax - totaLThrds
- * @note    currently we have no limit on the number of threads and groups
- * @todo    will need to add limit checks later
+ * 
 */
 TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags) {
     TGroup *tg;
@@ -219,10 +227,12 @@ TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags) {
 
     pthread_mutex_init(&tg->mutexGrp, NULL);
 
-    // /**
-    //  * @note    queue size can be changed later. Picked random size.
-    // */
-    if(q_init(&tg->q, 1024) != 0) {
+    /**
+     * @note    queue size can be changed later
+     * @note    picked random size
+    */
+    size_t qSize = max * Q_SIZE_MULT;
+    if(q_init(&tg->q, qSize) != 0) {
         goto error;
     }
 
@@ -249,9 +259,7 @@ error:
 }
 
 /**
- * @note    you will only be able to terminate idle threads
- * @todo    add more parameters to support terminating a certain number of threads or maybe only idle threads
- * @note    for now hard code the CLOSE TERMINATE and SOFT_KILL
+ * 
  */
 void destroy_group(TGroup *tg) {
     if(tg == NULL) {
@@ -271,6 +279,9 @@ void destroy_group(TGroup *tg) {
     free(tg);
 }
 
+/**
+ * Initialize a work struct before adding work to it.
+ */
 void init_work(Work **work) {
     if(work == NULL) {
         return;
@@ -282,12 +293,19 @@ void init_work(Work **work) {
     }
 }
 
+/**
+ * Accepts a void function and a void arg.
+ */
 void add_work(Work *work, work_func func, void *arg) {
     work->wf = func;
     work->work_arg = arg;
     work->prev = NULL;
 }
 
+/**
+ * Assign the work to a specific group.
+ * Do the work.
+ */
 int do_work(TGroup *tg, Work *work) {
     if(work == NULL || tg == NULL) {
         return -1;
@@ -326,15 +344,17 @@ int do_work(TGroup *tg, Work *work) {
 }
 
 /*  --Internal Functions--  */
+
+/**
+ * Adds a thread to a group.
+ * Checks to make sure that the number of threads has not been exceeded before adding
+ */
 static int internal_add_thread(TGroup *tg) {
     if(tg == NULL) {
         return -1;
     }
 
     TThread *tt;
-    TPool *tp;
-
-    tp = tg->pool;
 
     tt = (TThread *)malloc(sizeof(TThread));
     if(tt == NULL) {
@@ -380,12 +400,26 @@ error:
 }
 
 /**
+ * This function assumes that the group is already locked.
+ * For now it is only used in the manager thread function to check the health of a group.
  * 
+ * @todo    this function is not complete yet
+ * @todo    add the functionality to determine the groups health relative to work load
  */
-static int health_check(TGroup *tg) {
-    
+static Health internal_health_check(TGroup *tg) {
+    size_t amntWork; 
+    amntWork = q_length(tg->q);
+    return well;
 }
 
+/**
+ * 
+ * This functionality locks the group then the thread
+ * This will result in a deadlock if we try to lock a thread that is in the active list
+ * Because of this, we only loop through the idle list since we know the idle list will never lock itself
+ * 
+ * @note    this will not free the group
+ */
 static void internal_destroy_group(TGroup *tg) {
     TPool *tp = tg->pool;
 
@@ -425,7 +459,9 @@ static void internal_destroy_group(TGroup *tg) {
 }
 
 /**
- * @note    the last thread destroys the group
+ * Called whenever a thread in the worker function breaks from the while loop.
+ * Remove the thread from the group list.
+ * Update the number of total thrds that the pool has.
 */
 static void internal_destroy_thread(TThread *tt) {
     TGroup *tg = tt->tg;
@@ -453,6 +489,8 @@ static void internal_destroy_thread(TThread *tt) {
 }
 
 /**
+ * Executes the tasks that are added to a groups queue.
+ * 
  * @note    do not lock a thread that is in the active thread list
  * @note    only lock a thread that is within the idle thread list
 */
@@ -528,6 +566,7 @@ top:
 
     pthread_mutex_unlock(&tt->mutexThrd);
     internal_destroy_thread(tt);
+    return;
 }
 
 /**
@@ -537,6 +576,8 @@ top:
  * 
  * @note    maybe later the arg can be a manager struct
  * @note    struct could determine when threads should be created or deleted based on some sort of policy
+ * 
+ * @todo    this function is not complete yet
  */
 static void *manager_thread_function(void *arg) {
     struct timespec timeout;
@@ -564,7 +605,7 @@ static void *manager_thread_function(void *arg) {
             tg = CONTAINER_OF(curr, TGroup, move);
 
             pthread_mutex_lock(&tg->mutexGrp);
-            rc = health_check(tg);
+            rc = internal_health_check(tg);
             switch (rc) {
                 case well:
                     break;
@@ -591,6 +632,9 @@ static void *manager_thread_function(void *arg) {
 }
 
 /*  --Queue--   */
+/**
+ * @todo    may need to add a resize function for the queue
+ */
 static int q_init(struct Q **q, size_t capacity) {
     if(q == NULL) {
         return -1;
@@ -650,6 +694,6 @@ static Work *q_fetch(struct Q *q) {
     return tmp;
 }
 
-static int q_length(struct Q *q) {
+static size_t q_length(struct Q *q) {
     return q->length;
 }
