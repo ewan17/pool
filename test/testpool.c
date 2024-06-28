@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stdlib.h>
 #include "pool.h"
 
 static TPool *init_test(unsigned int thrds);
@@ -17,8 +18,8 @@ void add_group_test() {
     tp = init_test(8);
 
     TGroup *tg1, *tg2;
-    tg1 = add_group(tp, 2, 4, DYNAMIC);
-    tg2 = add_group(tp, 2, 4, DYNAMIC);
+    tg1 = add_group(tp, 2, 4, GROUP_DYNAMIC);
+    tg2 = add_group(tp, 2, 4, GROUP_DYNAMIC);
 
     destroy_group(tg1);
     destroy_group(tg2);
@@ -32,7 +33,7 @@ void add_work_test() {
     tp = init_test(8);
 
     TGroup *tg;
-    tg = add_group(tp, 2, 4, DYNAMIC);
+    tg = add_group(tp, 2, 4, GROUP_DYNAMIC);
 
     for (size_t i = 0; i < 10; i++)
     {

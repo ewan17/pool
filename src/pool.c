@@ -1,11 +1,20 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <pthread.h>
+
+/**
+ * @note    will remove this later
+ */
 #include <assert.h>
 
 #include "pool.h"
+#include "il.h"
 
-#define THREAD_COUNT(tg) (tg->idleThrds.len + tg->activeThrds.len)
-#define GROUP_COUNT(tp) (tp->groups.len)
+#define GROUP_CLOSE 0x04
+#define GROUP_CLEAN 0x08
+#define SOFT_KILL 0x10
+#define HARD_KILL 0x20
 
 struct Work {
     work_func wf;
@@ -20,6 +29,76 @@ struct Q {
     size_t capacity;
 };
 
+typedef enum {
+    well, 
+    moderate, 
+    poor
+} Health;
+
+typedef enum {
+    running,
+    idle
+} State;
+
+struct TPool {
+    pthread_mutex_t mutexPool;
+    pthread_cond_t condPool;
+
+    // total threads will represent all threads that are active or idle
+    unsigned int totalThrds;
+    // max number of threads that the pool can contain
+    unsigned int thrdMax;
+
+    LL groups;
+
+    // manager thread for the pool to be dynamic
+    pthread_t *manager;
+};
+
+struct TGroup {
+    IL move;
+    
+    pthread_mutex_t mutexGrp;
+
+    int flags;
+
+    // work queue
+    struct Q *q;
+
+    LL idleThrds;
+    LL activeThrds;
+
+    // min and max thread limits
+    unsigned int thrdMax;
+    unsigned int thrdMin;
+
+    TPool *pool;
+
+    // number of threads currently created
+    unsigned int numThrds;
+    pthread_t *thrds;
+};
+
+typedef struct TThread {
+    IL move;
+
+    pthread_t id;
+
+    pthread_mutex_t mutexThrd;
+    pthread_cond_t condThrd;
+
+    // current state of a thread
+    State state;
+
+    Work *currTask;
+
+    TGroup *tg;
+} TThread;
+
+/*  --Internal Functions--  */
+static int internal_add_thread(TGroup *tg);
+static enum Health health_check(TGroup *tg);
+
 static void internal_destroy_group(TGroup *tg);
 static void internal_destroy_thread(TThread *tt);
 
@@ -33,6 +112,8 @@ static Work *q_fetch(struct Q *q);
 static int q_length(struct Q *q);
 
 int init_pool(TPool **tp, unsigned int maxThrds) {
+    int rc;
+    
     if(tp == NULL) {
         return -1;
     }
@@ -50,10 +131,35 @@ int init_pool(TPool **tp, unsigned int maxThrds) {
 
     init_list(&(*tp)->groups);
 
+    rc = pthread_create(&(*tp)->manager, NULL, manager_thread_function, NULL);
+    assert(rc == 0);
+
     pthread_mutex_init(&(*tp)->mutexPool, NULL);
     pthread_cond_init(&(*tp)->condPool, NULL);
     
     return 0;
+}
+
+void destroy_pool(TPool *tp) {
+    if(tp == NULL) {
+        return;
+    }
+    
+    pthread_mutex_lock(&tp->mutexPool);
+    /**
+     * @todo    close the manager thread
+    */
+    IL *curr;
+    while((curr = list_pop(&tp->groups)) != NULL) {
+        TGroup *tg = CONTAINER_OF(curr, TGroup, move);
+        internal_destroy_group(tg);
+        free(tg);
+    }
+    pthread_mutex_unlock(&tp->mutexPool);
+    pthread_cond_destroy(&tp->condPool);
+    pthread_mutex_destroy(&tp->mutexPool);
+
+    free(tp);
 }
 
 /**
@@ -65,6 +171,10 @@ int init_pool(TPool **tp, unsigned int maxThrds) {
 TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags) {
     TGroup *tg;
 
+    if(tp == NULL) {
+        return NULL;
+    }
+
     if(min == 0) { 
         min = 1;
     }
@@ -75,7 +185,7 @@ TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags) {
         max = availableThrds;
     }
 
-    if(tp == NULL || max == 0 || min > max) {
+    if(max == 0 || min > max) {
         pthread_mutex_unlock(&tp->mutexPool);
         return NULL;
     }
@@ -86,18 +196,18 @@ TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags) {
         return NULL;
     }
 
-    tg->thrds = (pthread_t *)malloc(max*sizeof(pthread_t));
+    tg->thrds = (pthread_t *)malloc(max * sizeof(pthread_t));
     if(tg->thrds == NULL) {
         goto error;
     }
     tg->numThrds = 0;
     tg->pool = tp;
     
-    if(flags == FIXED || min == max) {
-        tg->flags = FIXED;
+    if(flags == GROUP_FIXED || min == max) {
+        tg->flags = GROUP_FIXED;
         tg->thrdMin = tg->thrdMax = min;
     } else {    
-        tg->flags = DYNAMIC;
+        tg->flags = GROUP_DYNAMIC;
         tg->thrdMin = min;
         tg->thrdMax = max;  
     }
@@ -116,18 +226,19 @@ TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags) {
         goto error;
     }
 
+    int rc;
     for (size_t i = 0; i < min; i++) {
         /**
          * @note    all the threads should be created or none of them
          * @todo    error handling needs fixing
         */
-        if(add_thread(tg) != 0) {
-            goto error;
-        }
+        rc = internal_add_thread(tg);
+        assert(rc == 0);
     }
 
     pthread_mutex_lock(&tp->mutexPool);
     list_append(&tp->groups, &tg->move);
+    tp->totalThrds += max;
     pthread_mutex_unlock(&tp->mutexPool);
 
     return tg;
@@ -153,6 +264,7 @@ void destroy_group(TGroup *tg) {
 
     pthread_mutex_lock(&tp->mutexPool);
     item_remove(&tg->move);
+    tp->totalThrds -= tg->thrdMax;
     tp->groups.len--;
     pthread_mutex_unlock(&tp->mutexPool);
 
@@ -184,7 +296,7 @@ int do_work(TGroup *tg, Work *work) {
     TThread *tt;
 
     pthread_mutex_lock(&tg->mutexGrp);
-    if(tg->flags & CLOSE) {
+    if(tg->flags & GROUP_CLOSE) {
         pthread_mutex_unlock(&tg->mutexGrp);
         return -1;
     }
@@ -206,40 +318,15 @@ int do_work(TGroup *tg, Work *work) {
 
     pthread_mutex_lock(&tt->mutexThrd);
     tt->currTask = work;
-    tt->state = RUNNING;
+    tt->state = running;
     pthread_cond_signal(&tt->condThrd);
     pthread_mutex_unlock(&tt->mutexThrd);
 
     return 0;
 }
 
-/**
- * @todo    needs fixing with all the other destory methods
-*/
-void destroy_pool(TPool *tp) {
-    if(tp == NULL) {
-        return;
-    }
-    
-    pthread_mutex_lock(&tp->mutexPool);
-    /**
-     * @todo    close the manager thread
-    */
-    IL *curr;
-    while((curr = list_pop(&tp->groups)) != NULL) {
-        TGroup *tg = CONTAINER_OF(curr, TGroup, move);
-        internal_destroy_group(tg);
-        free(tg);
-    }
-    pthread_mutex_unlock(&tp->mutexPool);
-    // may not need the condition
-    pthread_cond_destroy(&tp->condPool);
-    pthread_mutex_destroy(&tp->mutexPool);
-
-    free(tp);
-}
-
-int add_thread(TGroup *tg) {
+/*  --Internal Functions--  */
+static int internal_add_thread(TGroup *tg) {
     if(tg == NULL) {
         return -1;
     }
@@ -254,7 +341,7 @@ int add_thread(TGroup *tg) {
         return -1;
     }
 
-    tt->state = RUNNING;
+    tt->state = running;
     tt->tg = tg;
     tt->currTask = NULL;
 
@@ -285,13 +372,18 @@ int add_thread(TGroup *tg) {
     tg->numThrds++;
     pthread_mutex_unlock(&tg->mutexGrp);
 
-    tp->totalThrds++;
-
     return 0;
 
 error:
     free(tt);
     return -1;
+}
+
+/**
+ * 
+ */
+static int health_check(TGroup *tg) {
+    
 }
 
 static void internal_destroy_group(TGroup *tg) {
@@ -301,7 +393,7 @@ static void internal_destroy_group(TGroup *tg) {
     size_t numThrds = 0;
 
     pthread_mutex_lock(&tg->mutexGrp);
-    tg->flags |= (CLOSE | SOFT_KILL);
+    tg->flags |= (GROUP_CLOSE | SOFT_KILL);
 
     threads = tg->thrds;
     numThrds = tg->numThrds;
@@ -315,7 +407,7 @@ static void internal_destroy_group(TGroup *tg) {
         list_append(&tg->activeThrds, curr);
 
         pthread_mutex_lock(&tt->mutexThrd);
-        tt->state = RUNNING;
+        tt->state = running;
         pthread_cond_signal(&tt->condThrd);
         pthread_mutex_unlock(&tt->mutexThrd);
     }
@@ -342,7 +434,7 @@ static void internal_destroy_thread(TThread *tt) {
     pthread_mutex_lock(&tg->mutexGrp);
     item_remove(&tt->move);
 
-    if(tt->state != IDLE) {
+    if(tt->state != idle) {
         tg->activeThrds.len--;
     } else {
         // all threads terminating should be in a running state
@@ -355,7 +447,9 @@ static void internal_destroy_thread(TThread *tt) {
 
     free(tt);
 
+    pthread_mutex_lock(&tp->mutexPool);
     tp->totalThrds--;
+    pthread_mutex_unlock(&tp->mutexPool);
 }
 
 /**
@@ -396,7 +490,7 @@ top:
             break;
         }
         
-        if(tg->flags & CLEAN) {
+        if(tg->flags & GROUP_CLEAN) {
             assert(0);
             /**
              * @todo    add clean later
@@ -417,16 +511,16 @@ top:
         }
 
         // this position is reached when the task is null
-        if(tt->state == RUNNING) {
+        if(tt->state == running) {
             // append thread to idle list
             item_remove(&tt->move);
             tg->activeThrds.len--;
-            tt->state = IDLE;
+            tt->state = idle;
             list_append(&tg->idleThrds, &tt->move);
         }
         pthread_mutex_unlock(&tg->mutexGrp);
 
-        while(tt->state == IDLE) {            
+        while(tt->state == idle) {            
             pthread_cond_wait(&tt->condThrd, &tt->mutexThrd);
         }
         pthread_mutex_unlock(&tt->mutexThrd);        
@@ -436,30 +530,67 @@ top:
     internal_destroy_thread(tt);
 }
 
+/**
+ * Acts as a manager for the entire pool. Will check groups and make sure they are healthy.
+ * Depending ont he health status, the manager may need to create or delete threads within a group.
+ * The arg passed in currently is NULL.
+ * 
+ * @note    maybe later the arg can be a manager struct
+ * @note    struct could determine when threads should be created or deleted based on some sort of policy
+ */
 static void *manager_thread_function(void *arg) {
-//     struct timespec timeout;
-//     clock_gettime(CLOCK_REALTIME, &timeout);
-//     timeout.tv_sec += 5;
+    struct timespec timeout;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_sec += 5;
 
-//     TPool *tp;
+    TPool *tp;
 
-//     while(1) {
-//         pthread_mutex_lock(&tp->mutexPool);
-//         int rc;
-//         rc = pthread_cond_timedwait(&tp->condPool, &tp->mutexPool, &timeout);
+    pthread_mutex_lock(&tp->mutexPool);
+    while(1) {
+        int rc;
+        rc = pthread_cond_timedwait(&tp->condPool, &tp->mutexPool, &timeout);
         
-//         if(rc == 0 && ) { 
-//             break;
-//         }
+        if(rc == -1 && errno != ETIMEDOUT) {
+            assert(0);
+        }
 
-//         pthread_mutex_unlock(&tp->mutexPool);
-//     }
+        if(empty(&tp->groups)) {
+            continue;
+        }
 
-//     pthread_exit(NULL);
+        IL *curr;
+        TGroup *tg;
+        for_each(&tp->groups.head, curr) {
+            tg = CONTAINER_OF(curr, TGroup, move);
+
+            pthread_mutex_lock(&tg->mutexGrp);
+            rc = health_check(tg);
+            switch (rc) {
+                case well:
+                    break;
+                
+                // 
+                case moderate:
+                    /* code */
+                    break;
+
+                // create as many threads as we can until we reach thrdMax for the group
+                case poor:
+                    /* code */
+                    break;
+            }
+            // creating a thread is expensive
+            // threads created will need to stay alive for awhile before being destroyed
+            pthread_mutex_unlock(&tg->mutexGrp);
+        }
+    }
+    pthread_mutex_unlock(&tp->mutexPool);
+
+    pthread_exit(NULL);
     return;
 }
 
-/*---- Queue ----*/
+/*  --Queue--   */
 static int q_init(struct Q **q, size_t capacity) {
     if(q == NULL) {
         return -1;

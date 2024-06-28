@@ -1,36 +1,42 @@
 CC	= gcc
+AR	= ar
 W = -W -Wall -g
 INCLUDE = include
 CFLAGS = $(W) $(addprefix -I, $(INCLUDE))
 
 BIN = bin
+TARGET = threadpool.a
 
-TESTS = testpool
+TESTS = testpool 
 
-.PHONY: clean bench
+.PHONY: clean bench bin
+
+all:	bin	$(TARGET)
 
 clean:
-	rm -rf $(BIN) $(TESTS) *.[ao] *.[ls]o
-
-test:	$(TESTS)
-
-testpool: testpool.o	pool.a
-	@mkdir -p $(BIN)
-	$(CC) $(CFLAGS) -o $(BIN)/$@ $^
-	chmod +x ./test/val.sh
-	./test/val.sh $(BIN)/$@
+	rm -rf $(BIN) $(TARGET)
 
 bench:
 	@echo "bench mark"
 
+bin:
+	@mkdir -p $(BIN)
+
+test:	bin	$(TESTS)
+
+testpool: testpool.o	$(TARGET)
+	$(CC) $(CFLAGS) -o $(BIN)/$@ $(BIN)/$^
+	chmod +x ./test/val.sh
+	./test/val.sh $(BIN)/$@
+
 %.o:	src/%.c
-	$(CC) $(CFLAGS) -c $<
+	$(CC) $(CFLAGS) -c $< -o $(BIN)/$@
 
 %.o:	test/%.c
-	$(CC) $(CFLAGS) -c $<
+	$(CC) $(CFLAGS) -c $< -o $(BIN)/$@
 
-pool.a:	pool.o
-	$(AR) rs $@ pool.o
+$(TARGET):	pool.o
+	$(AR) rs $@ $(BIN)/pool.o
 
 pool.o: src/pool.c
-	$(CC) $(CFLAGS) -c $< 
+	$(CC) $(CFLAGS) -c $< -o $(BIN)/$@
