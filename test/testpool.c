@@ -6,7 +6,7 @@
 static TPool *init_test(unsigned int thrds);
 static void destroy_test(TPool *tp);
 
-static void *thread_func(void *arg);
+static void thread_func(void *arg);
 
 void init_pool_test(unsigned int thrds) {
     TPool *tp;
@@ -54,28 +54,63 @@ void add_work_test() {
     destroy_test(tp);
 }
 
+void add_work_test2() {
+    int rc;
+    TPool *tp;
+    tp = init_test(24);
+
+    size_t numGroups = 6;
+    TGroup *tg[numGroups];
+    for (size_t i = 0; i < numGroups; i++)
+    {
+        TGroup *grp;
+        grp = add_group(tp, 2, 4, GROUP_DYNAMIC);
+        tg[i] = grp;
+    }
+
+    int arr[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20};
+    size_t len = 20;
+
+    for (size_t i = 0; i < len; i++)
+    {
+        Work *work;
+        size_t index;
+        int rc;
+
+        init_work(&work);
+        add_work(work, thread_func, NULL);
+
+        index = i % numGroups;
+        
+        rc = do_work(tg[index], work);
+        assert(rc == 0);
+    }
+
+    destroy_test(tp);
+}
+
 int main(int argc, char *argv[]) {
-    init_pool_test(8);
-    add_group_test();
-    add_work_test();
+    // init_pool_test(8);
+    // add_group_test();
+    // add_work_test();
+    add_work_test2();
     return 0;    
 }
 
-static void *thread_func(void *arg) {
+static void thread_func(void *arg) {
     int sum = 0;
     for (int i = 0; i < 50; i++)
     {
         sum++;
     }
     printf("sum %d\n", sum);
-    return NULL;
 }
 
 static TPool *init_test(unsigned int thrds) {
     TPool *tp;
     int rc;
 
-    rc = init_pool(&tp, 8);
+    rc = init_pool(&tp, thrds);
     assert(rc == 0);
 
     return tp;

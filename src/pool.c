@@ -221,14 +221,11 @@ TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags) {
     pthread_mutex_unlock(&tp->mutexPool);
 
     tg = (TGroup *)malloc(sizeof(TGroup));
-    if(tg == NULL) {
-        return NULL;
-    }
+    assert(tg != NULL);
 
     tg->thrds = (pthread_t *)malloc(max * sizeof(pthread_t));
-    if(tg->thrds == NULL) {
-        goto error;
-    }
+    assert(tg->thrds != NULL);
+    
     tg->numThrds = 0;
     tg->pool = tp;
     
@@ -253,9 +250,7 @@ TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags) {
      * @note    picked random size
     */
     size_t qSize = max * Q_SIZE_MULT;
-    if(q_init(&tg->q, qSize) != 0) {
-        goto error;
-    }
+    assert(q_init(&tg->q, qSize) == 0);
 
     int rc;
     for (size_t i = 0; i < min; i++) {
@@ -273,10 +268,6 @@ TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags) {
     pthread_mutex_unlock(&tp->mutexPool);
 
     return tg;
-
-error:
-    free(tg);
-	return NULL;
 }
 
 /**
@@ -426,7 +417,7 @@ static int internal_add_thread(TGroup *tg) {
      * @todo    add limit error on the number of threads that can be added to the group
     */
     pthread_mutex_lock(&tg->mutexGrp);
-    if(tg->numThrds == tg->thrdMax - 1) {
+    if(tg->numThrds > tg->thrdMax - 1) {
         pthread_mutex_unlock(&tg->mutexGrp);
         goto error;
     }
@@ -630,52 +621,52 @@ top:
  * @todo    this function is not complete yet
  */
 static void *manager_thread_function(void *arg) {
-    struct timespec timeout;
-    clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_sec += 5;
+    // struct timespec timeout;
+    // clock_gettime(CLOCK_REALTIME, &timeout);
+    // timeout.tv_sec += 5;
 
-    TPool *tp;
+    // TPool *tp;
 
-    pthread_mutex_lock(&tp->mutexPool);
-    while(1) {
-        int rc;
-        rc = pthread_cond_timedwait(&tp->condPool, &tp->mutexPool, &timeout);
+    // pthread_mutex_lock(&tp->mutexPool);
+    // while(1) {
+    //     int rc;
+    //     rc = pthread_cond_timedwait(&tp->condPool, &tp->mutexPool, &timeout);
         
-        if(rc == -1 && errno != ETIMEDOUT) {
-            assert(0);
-        }
+    //     if(rc == -1 && errno != ETIMEDOUT) {
+    //         assert(0);
+    //     }
 
-        if(empty(&tp->groups)) {
-            continue;
-        }
+    //     if(empty(&tp->groups)) {
+    //         continue;
+    //     }
 
-        IL *curr;
-        TGroup *tg;
-        for_each(&tp->groups.head, curr) {
-            tg = CONTAINER_OF(curr, TGroup, move);
+    //     IL *curr;
+    //     TGroup *tg;
+    //     for_each(&tp->groups.head, curr) {
+    //         tg = CONTAINER_OF(curr, TGroup, move);
 
-            pthread_mutex_lock(&tg->mutexGrp);
-            rc = internal_health_check(tg);
-            switch (rc) {
-                case well:
-                    break;
+    //         pthread_mutex_lock(&tg->mutexGrp);
+    //         rc = internal_health_check(tg);
+    //         switch (rc) {
+    //             case well:
+    //                 break;
                 
-                // 
-                case moderate:
-                    /* code */
-                    break;
+    //             // 
+    //             case moderate:
+    //                 /* code */
+    //                 break;
 
-                // create as many threads as we can until we reach thrdMax for the group
-                case poor:
-                    /* code */
-                    break;
-            }
-            // creating a thread is expensive
-            // threads created will need to stay alive for awhile before being destroyed
-            pthread_mutex_unlock(&tg->mutexGrp);
-        }
-    }
-    pthread_mutex_unlock(&tp->mutexPool);
+    //             // create as many threads as we can until we reach thrdMax for the group
+    //             case poor:
+    //                 /* code */
+    //                 break;
+    //         }
+    //         // creating a thread is expensive
+    //         // threads created will need to stay alive for awhile before being destroyed
+    //         pthread_mutex_unlock(&tg->mutexGrp);
+    //     }
+    // }
+    // pthread_mutex_unlock(&tp->mutexPool);
 
     return NULL;
 }

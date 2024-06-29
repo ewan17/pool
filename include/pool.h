@@ -13,7 +13,7 @@ typedef struct TPool TPool;
 typedef struct TGroup TGroup;
 typedef struct Work Work;
 
-typedef void *(*work_func)(void *work_arg);
+typedef void (*work_func)(void *work_arg);
 
 int init_pool(TPool **tp, unsigned int maxThrds);
 void destroy_pool(TPool *tp);
