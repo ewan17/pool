@@ -43,10 +43,24 @@ Adds a work function to the work item.
 - `int do_work(TGroup *tg, Work *work);`
 Executes work in a thread group.
 
+## References
+
+Here are some links that I found helpful when constructing this project.
+
+- [John's Blog](https://nachtimwald.com/2019/04/12/thread-pool-in-c/)
+- [C Thread Pool](https://github.com/Pithikos/C-Thread-Pool)
+- [Dynamic Thread Pool](https://github.com/Charles0429/thread_pool)
+- [The New MySQL Thread Pool](https://dev.mysql.com/blog-archive/the-new-mysql-thread-pool/)
+
 ## Bench
 
-The bench marks are a work in progress. The number of threads used correspond to the number of cores I have on my machine.
-To run the benchmark:
+The bench marks are a work in progress. To run the benchmark:
+
+1. **Compile the Bench**:
 
    ```bash
    make bench
+
+## Results
+
+When looping through an array of size 20 and calculating the factorial of  

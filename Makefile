@@ -30,7 +30,7 @@ testpool:	testpool.o	$(TARGET)
 	./test/val.sh $(BIN)/$@
 
 benchpool:	benchpool.o $(LIB)/jhs.a $(TARGET)
-	$(CC) -DNDEBUG $(CFLAGS) -o $(BIN)/$@ $(BIN)/$^
+	$(CC) -DNDEBUG $(CFLAGS) -o $(BIN)/$@ $(BIN)/$^ -lm
 	./$(BIN)/$@
 
 %.o:	src/%.c
