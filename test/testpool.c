@@ -55,7 +55,6 @@ void add_work_test() {
 }
 
 void add_work_test2() {
-    int rc;
     TPool *tp;
     tp = init_test(24);
 
@@ -68,9 +67,7 @@ void add_work_test2() {
         tg[i] = grp;
     }
 
-    int arr[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20};
     size_t len = 20;
-
     for (size_t i = 0; i < len; i++)
     {
         Work *work;
@@ -85,7 +82,8 @@ void add_work_test2() {
         rc = do_work(tg[index], work);
         assert(rc == 0);
     }
-
+    wait_pool(tp);
+    
     destroy_test(tp);
 }
 
@@ -103,7 +101,7 @@ static void thread_func(void *arg) {
     {
         sum++;
     }
-    printf("sum %d\n", sum);
+    assert(sum == 50);
 }
 
 static TPool *init_test(unsigned int thrds) {

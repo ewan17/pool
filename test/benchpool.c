@@ -87,6 +87,7 @@ void multi_threaded_ewan17(int arr[], size_t len) {
             index = i % numGroups;
             do_work(tg[index], work);
         }
+        wait_pool(pool);
         clock_gettime(CLOCK_MONOTONIC, &finish);
         sum += elapsed_time(start, finish);
     }
@@ -109,6 +110,7 @@ void multi_threaded_jhs(int arr[], size_t len) {
         {
             thpool_add_work(thpool, thread_function, (void *)(intptr_t)arr[i]);
         }
+        thpool_wait(thpool);
         clock_gettime(CLOCK_MONOTONIC, &finish);
         sum += elapsed_time(start, finish);
     }

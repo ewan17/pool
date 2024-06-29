@@ -13,10 +13,13 @@
 
 #define Q_SIZE_MULT 2
 
+#define DONE_WAITING 1
+
 #define GROUP_CLOSE 0x04
 #define GROUP_CLEAN 0x08
-#define SOFT_KILL 0x10
-#define HARD_KILL 0x20
+#define GROUP_WAIT 0x10
+#define SOFT_KILL 0x20
+#define HARD_KILL 0x40
 
 struct Work {
     work_func wf;
@@ -52,6 +55,8 @@ struct TPool {
     unsigned int thrdMax;
 
     LL groups;
+
+    int groupsWaiting;
 
     // manager thread for the pool to be dynamic
     pthread_t manager;
@@ -98,6 +103,8 @@ typedef struct TThread {
 } TThread;
 
 /*  --Internal Functions--  */
+static int internal_wait_helper(TGroup *tg);
+
 static int internal_add_thread(TGroup *tg);
 static Health internal_health_check(TGroup *tg);
 
@@ -136,6 +143,7 @@ int init_pool(TPool **tp, unsigned int maxThrds) {
     if(maxThrds == 0) {
         return POOL_ERROR;
     }
+    (*tp)->groupsWaiting = 0;
     (*tp)->thrdMax = maxThrds;
     (*tp)->totalThrds = 0;
 
@@ -154,6 +162,35 @@ int init_pool(TPool **tp, unsigned int maxThrds) {
 }
 
 /**
+ * Wait till all jobs are finished.
+ * 
+ * @param   tp      pool struct
+ */
+void wait_pool(TPool *tp) {
+    if(tp == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&tp->mutexPool);
+    tp->groupsWaiting = tp->groups.len;
+
+    IL *curr;
+    int rc;
+    for_each(&tp->groups.head, curr) {
+        TGroup *tg = CONTAINER_OF(curr, TGroup, move);
+        rc = internal_wait_helper(tg);
+        if(rc != 0) {
+            tp->groupsWaiting--;
+        }
+    }
+    
+    while(tp->groupsWaiting > 0) {
+        pthread_cond_wait(&tp->condPool, &tp->mutexPool);
+    }
+    pthread_mutex_unlock(&tp->mutexPool);
+}
+
+/**
  * Destroys a pool.
  * Will destroy all groups and all threads within a group.
  * 
@@ -169,7 +206,6 @@ void destroy_pool(TPool *tp) {
     while((curr = list_pop(&tp->groups)) != NULL) {
         TGroup *tg = CONTAINER_OF(curr, TGroup, move);
         internal_destroy_group(tg);
-
         tp->totalThrds -= tg->thrdMax;
 
         free(tg);
@@ -388,6 +424,18 @@ int do_work(TGroup *tg, Work *work) {
 
 /*  --Internal Functions--  */
 
+static int internal_wait_helper(TGroup *tg) {
+    pthread_mutex_lock(&tg->mutexGrp);
+    if(q_empty(tg->q)) {
+        pthread_mutex_unlock(&tg->mutexGrp);
+        return POOL_ERROR;
+    }
+
+    tg->flags |= GROUP_WAIT;
+    pthread_mutex_unlock(&tg->mutexGrp);
+    return POOL_SUCCESS;
+}
+
 /**
  * Adds a thread to a group.
  * Checks to make sure that the number of threads has not been exceeded before adding
@@ -459,7 +507,6 @@ static Health internal_health_check(TGroup *tg) {
 }
 
 /**
- * 
  * This functionality locks the group then the thread
  * This will result in a deadlock if we try to lock a thread that is in the active list
  * Because of this, we only loop through the idle list since we know the idle list will never lock itself
@@ -536,13 +583,16 @@ static void internal_destroy_thread(TThread *tt) {
  * @note    only lock a thread that is within the idle thread list
 */
 static void *worker_thread_function(void *arg) {
+    TPool *tp;
     TGroup *tg;
     TThread *tt;
     tt = (TThread *) arg;
     tg = tt->tg;
+    tp = tg->pool;
 
     while(1) {
         Work *task;
+        int wait;
 
         pthread_mutex_lock(&tt->mutexThrd);
 top:
@@ -591,6 +641,12 @@ top:
 
         // this position is reached when the task is null
         if(tt->state == running) {
+            // the last thread that is being waited on within a group
+            wait = ((tg->flags & GROUP_WAIT) && (tg->activeThrds.len == 1));
+            if(wait) {
+                tg->flags &= ~GROUP_WAIT;
+            }
+                
             // append thread to idle list
             item_remove(&tt->move);
             tg->activeThrds.len--;
@@ -599,7 +655,14 @@ top:
         }
         pthread_mutex_unlock(&tg->mutexGrp);
 
-        while(tt->state == idle) {            
+        if(wait) {
+            pthread_mutex_lock(&tp->mutexPool);
+            tp->groupsWaiting--;
+            pthread_cond_signal(&tp->condPool);
+            pthread_mutex_unlock(&tp->mutexPool);
+        }
+
+        while(tt->state == idle) {
             pthread_cond_wait(&tt->condThrd, &tt->mutexThrd);
         }
         pthread_mutex_unlock(&tt->mutexThrd);        

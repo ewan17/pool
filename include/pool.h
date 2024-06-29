@@ -16,6 +16,7 @@ typedef struct Work Work;
 typedef void (*work_func)(void *work_arg);
 
 int init_pool(TPool **tp, unsigned int maxThrds);
+void wait_pool(TPool *tp);
 void destroy_pool(TPool *tp);
 
 TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags);
