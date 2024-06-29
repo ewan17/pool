@@ -90,9 +90,9 @@ void add_work_test2() {
 }
 
 int main(int argc, char *argv[]) {
-    // init_pool_test(8);
-    // add_group_test();
-    // add_work_test();
+    init_pool_test(8);
+    add_group_test();
+    add_work_test();
     add_work_test2();
     return 0;    
 }

@@ -7,6 +7,9 @@
 #include "pool.h"
 #include "jhs/thpool.h"
 
+#define BENCH_ITERATIONS 100
+#define MESSAGE "Average time for 100 iterations"
+
 double elapsed_time(struct timespec start, struct timespec finish) {
     double timeDiff;
     timeDiff = (finish.tv_sec - start.tv_sec);
@@ -55,7 +58,7 @@ void single_threaded(int arr[], size_t len) {
 
 void multi_threaded_ewan17(int arr[], size_t len) {
     struct timespec start, finish;
-    double result;
+    double sum;
 
     TPool *pool;
     init_pool(&pool, 15);
@@ -70,39 +73,47 @@ void multi_threaded_ewan17(int arr[], size_t len) {
         tg[i] = grp;
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    for (size_t i = 0; i < len; i++)
+    for (size_t i = 0; i < BENCH_ITERATIONS; i++)
     {
-        Work *work;
-        size_t index;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (size_t i = 0; i < len; i++)
+        {
+            Work *work;
+            size_t index;
 
-        init_work(&work);
-        add_work(work, thread_function, (void *)(intptr_t)arr[i]);
+            init_work(&work);
+            add_work(work, thread_function, (void *)(intptr_t)arr[i]);
 
-        index = i % numGroups;
-        do_work(tg[index], work);
+            index = i % numGroups;
+            do_work(tg[index], work);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &finish);
+        sum += elapsed_time(start, finish);
     }
-    clock_gettime(CLOCK_MONOTONIC, &finish);
-    result = elapsed_time(start, finish);
-    printf("Multiple threads (ewan17): %.6f seconds\n", result);
+    
+    printf("%s (ewan17): %.6f seconds\n", MESSAGE, (sum/BENCH_ITERATIONS));
 
     destroy_pool(pool);
 }
 
-void multi_threaded_pithikos(int arr[], size_t len) {
+void multi_threaded_jhs(int arr[], size_t len) {
     struct timespec start, finish;
-    double result;
+    double sum;
 
     threadpool thpool = thpool_init(15);
 
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    for (size_t i = 0; i < len; i++)
+    for (size_t i = 0; i < BENCH_ITERATIONS; i++)
     {
-        thpool_add_work(thpool, thread_function, (void *)(intptr_t)arr[i]);
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (size_t i = 0; i < len; i++)
+        {
+            thpool_add_work(thpool, thread_function, (void *)(intptr_t)arr[i]);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &finish);
+        sum += elapsed_time(start, finish);
     }
-    clock_gettime(CLOCK_MONOTONIC, &finish);
-    result = elapsed_time(start, finish);
-    printf("Multiple threads (pithikos): %.6f seconds\n", result);
+
+    printf("%s (jhs): %.6f seconds\n", MESSAGE, (sum/BENCH_ITERATIONS));
 
     thpool_destroy(thpool);
 }
@@ -123,8 +134,8 @@ int main(int argc, char *argv[]) {
     int arr[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20};
     size_t len = 20;
 
-    single_threaded(arr, len);
-    multi_threaded_pithikos(arr, len);
+    // single_threaded(arr, len);
+    multi_threaded_jhs(arr, len);
     multi_threaded_ewan17(arr, len);
 
     return 0;
