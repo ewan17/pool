@@ -2,7 +2,7 @@ CC	= gcc
 AR	= ar
 W = -W -Wall -g
 INCLUDE = include
-CFLAGS = $(W) $(addprefix -I, $(INCLUDE)) -lpthread
+CFLAGS = $(W) $(addprefix -I, $(INCLUDE))
 
 LIB = lib
 BIN = bin
@@ -40,10 +40,10 @@ benchpool:	benchpool.o $(LIB)/jhs.a $(TARGET)
 	$(CC) $(CFLAGS) -c $< -o $(BIN)/$@
 
 $(TARGET):	pool.o
-	$(AR) rs -o $@ $(BIN)/$^
+	$(AR) rs $@ $(BIN)/$^
 
 $(LIB)/jhs.a:	thpool.o
-	$(AR) rs -o $@ $(BIN)/$^
+	$(AR) rs $@ $(BIN)/$^
 
 thpool.o: test/jhs/thpool.c
 	$(CC) $(CFLAGS) -c $< -o $(BIN)/$@
