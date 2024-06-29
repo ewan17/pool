@@ -29,7 +29,7 @@ testpool:	testpool.o	$(TARGET)
 	chmod +x ./test/val.sh
 	./test/val.sh $(BIN)/$@
 
-benchpool:	benchpool.o $(LIB)/pithikos.a $(TARGET)
+benchpool:	benchpool.o $(LIB)/jhs.a $(TARGET)
 	$(CC) -DNDEBUG $(CFLAGS) -o $(BIN)/$@ $(BIN)/$^
 	./$(BIN)/$@
 
@@ -42,10 +42,10 @@ benchpool:	benchpool.o $(LIB)/pithikos.a $(TARGET)
 $(TARGET):	pool.o
 	$(AR) rs -o $@ $(BIN)/$^
 
-$(LIB)/pithikos.a:	thpool.o
+$(LIB)/jhs.a:	thpool.o
 	$(AR) rs -o $@ $(BIN)/$^
 
-thpool.o: test/pithikos/thpool.c
+thpool.o: test/jhs/thpool.c
 	$(CC) $(CFLAGS) -c $< -o $(BIN)/$@
 
 pool.o: src/pool.c

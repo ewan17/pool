@@ -5,7 +5,7 @@
 #include <stdlib.h>
 
 #include "pool.h"
-#include "pithikos/thpool.h"
+#include "jhs/thpool.h"
 
 double elapsed_time(struct timespec start, struct timespec finish) {
     double timeDiff;
