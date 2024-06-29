@@ -11,7 +11,6 @@ The thread pool is provided as a precompiled static library (`threadpool.a`). To
 
 1. **Compile the Library**: First, compile the provided source files into the static library using `make`.
 
-   Example:
    ```bash
    make
 
@@ -22,3 +21,8 @@ The thread pool is provided as a precompiled static library (`threadpool.a`). To
    gcc -o example example.c -L/path/to/threadpool -lthreadpool -pthread
 
 ## Bench
+
+The bench marks are a work in progress. The number of threads used correspond to the number of cores I have on my machine. To run the benchmark:
+
+   ```bash
+   make bench
