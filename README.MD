@@ -22,25 +22,25 @@ The thread pool is provided as a precompiled static library (`threadpool.a`). To
 
 ## Functions
 
-**`int init_pool(TPool **tp, unsigned int maxThrds);**
+- `int init_pool(TPool **tp, unsigned int maxThrds);`
 Initializes a thread pool.
 
-**`void destroy_pool(TPool *tp);**
+- `void destroy_pool(TPool *tp);`
 Destroys the thread pool.
 
-**`TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags);**
+- `TGroup *add_group(TPool *tp, unsigned int min, unsigned int max, int flags);`
 Adds a group to the thread pool.
 
-**`void destroy_group(TGroup *tg);**
+- `void destroy_group(TGroup *tg);`
 Destroys a thread group.
 
-**`void init_work(Work **work);**
+- `void init_work(Work **work);`
 Initializes a work item.
 
-**`void add_work(Work *work, work_func func, void *arg);**
+- `void add_work(Work *work, work_func func, void *arg);`
 Adds a work function to the work item.
 
-**`int do_work(TGroup *tg, Work *work);**
+- `int do_work(TGroup *tg, Work *work);`
 Executes work in a thread group.
 
 ## Bench
