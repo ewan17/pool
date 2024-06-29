@@ -119,8 +119,6 @@ int main(int argc, char *argv[]) {
     /**
      * @todo    handle input args later
      */
-    // 15 threads, 5 groups, max 3 threads per group.
-    // only 2 will be active for each group since manager thread is not running currently
 
     int arr[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20};
     size_t len = 20;
