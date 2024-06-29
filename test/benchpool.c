@@ -8,7 +8,9 @@
 #include "jhs/thpool.h"
 
 #define BENCH_ITERATIONS 100
-#define MESSAGE "Average time for 100 iterations"
+#define STR_NUM(x) #x
+#define STR(x) STR_NUM(x)
+#define MESSAGE "Average time for "STR(BENCH_ITERATIONS)" iterations"
 
 double elapsed_time(struct timespec start, struct timespec finish) {
     double timeDiff;
@@ -25,8 +27,7 @@ double elapsed_time(struct timespec start, struct timespec finish) {
 
 size_t factorial_func(size_t input) {
     size_t result = 1;
-    for (size_t i = 1; i <= input; i++)
-    {
+    for (size_t i = 1; i <= input; i++) {
         result *= i;
     }
 
@@ -44,47 +45,45 @@ void thread_function(void* arg) {
 
 void single_threaded(int arr[], size_t len) {
     struct timespec start, finish;
-    double result; 
+    double sum = 0;
 
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    for (size_t i = 0; i < len; i++)
-    {
-        factorial_func(arr[i]);
+    for (size_t i = 0; i < BENCH_ITERATIONS; i++) {
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (size_t j = 0; j < len; j++) {
+            factorial_func(arr[j]);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &finish);
+        sum += elapsed_time(start, finish);
     }
-    clock_gettime(CLOCK_MONOTONIC, &finish);
-    result = elapsed_time(start, finish);
-    printf("Single thread: %.6f seconds\n", result);
+    printf("Average time for single thread: %.6f seconds\n", (sum/BENCH_ITERATIONS));
 }
 
 void multi_threaded_ewan17(int arr[], size_t len) {
     struct timespec start, finish;
-    double sum;
+    double sum = 0;
 
     TPool *pool;
     init_pool(&pool, 15);
 
     size_t numGroups = 3;
     TGroup *tg[numGroups];
-    for (size_t i = 0; i < numGroups; i++)
-    {
+    for (size_t i = 0; i < numGroups; i++) {
         TGroup *grp;
         grp = add_group(pool, 5, 5, GROUP_FIXED);
         assert(grp != NULL);
         tg[i] = grp;
     }
 
-    for (size_t i = 0; i < BENCH_ITERATIONS; i++)
-    {
+    for (size_t i = 0; i < BENCH_ITERATIONS; i++) {
         clock_gettime(CLOCK_MONOTONIC, &start);
-        for (size_t i = 0; i < len; i++)
-        {
+        for (size_t j = 0; j < len; j++) {
             Work *work;
             size_t index;
 
             init_work(&work);
-            add_work(work, thread_function, (void *)(intptr_t)arr[i]);
+            add_work(work, thread_function, (void *)(intptr_t)arr[j]);
 
-            index = i % numGroups;
+            index = j % numGroups;
             do_work(tg[index], work);
         }
         wait_pool(pool);
@@ -99,16 +98,14 @@ void multi_threaded_ewan17(int arr[], size_t len) {
 
 void multi_threaded_jhs(int arr[], size_t len) {
     struct timespec start, finish;
-    double sum;
+    double sum = 0;
 
     threadpool thpool = thpool_init(15);
 
-    for (size_t i = 0; i < BENCH_ITERATIONS; i++)
-    {
+    for (size_t i = 0; i < BENCH_ITERATIONS; i++) {
         clock_gettime(CLOCK_MONOTONIC, &start);
-        for (size_t i = 0; i < len; i++)
-        {
-            thpool_add_work(thpool, thread_function, (void *)(intptr_t)arr[i]);
+        for (size_t j = 0; j < len; j++) {
+            thpool_add_work(thpool, thread_function, (void *)(intptr_t)arr[j]);
         }
         thpool_wait(thpool);
         clock_gettime(CLOCK_MONOTONIC, &finish);
@@ -133,10 +130,10 @@ int main(int argc, char *argv[]) {
      * @todo    handle input args later
      */
 
-    int arr[] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20};
+    int arr[] = {1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000};
     size_t len = 20;
 
-    // single_threaded(arr, len);
+    single_threaded(arr, len);
     multi_threaded_jhs(arr, len);
     multi_threaded_ewan17(arr, len);
 
