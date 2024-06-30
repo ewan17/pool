@@ -60,7 +60,3 @@ The bench marks are a work in progress. To run the benchmark:
 
    ```bash
    make bench
-
-## Results
-
-When looping through an array of size 20 and calculating the factorial of  
