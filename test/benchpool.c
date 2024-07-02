@@ -9,7 +9,7 @@
 #include "pool.h"
 #include "jhs/thpool.h"
 
-#define BENCH_ITERATIONS 100
+#define BENCH_ITERATIONS 500
 #define STR_NUM(x) #x
 #define STR(x) STR_NUM(x)
 #define MESSAGE "Mean time for "STR(BENCH_ITERATIONS)" iterations"
@@ -186,12 +186,12 @@ int main(int argc, char *argv[]) {
     // if(argc == 0) {
     //     numCores = sysconf(_SC_NPROCESSORS_CONF);
     // }
-
+    printf("Running bench mark...\n");
     /**
      * @todo    handle input args later
      */
     // this will result in values larger than size_t, but we make sure the size_t variable will not overflow
-    int arr[] = {1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000,1000000000};
+    int arr[] = {100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000};
     size_t len = 20;
 
     single_threaded(arr, len);
