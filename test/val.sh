@@ -6,8 +6,9 @@ valgrind='valgrind --tool=memcheck --leak-check=yes --show-leak-kinds=all'
 
 logfile="test.log"
 
+executable="$1"
+
 run_valgrind() {
-    local executable="$1"
     echo "Running Valgrind on: $executable"
     $valgrind ./$executable 2>&1 | tee $logfile
 }
@@ -22,8 +23,12 @@ check_valgrind_output() {
     fi
 }
 
-run_valgrind "$1"
-check_valgrind_output
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    run_valgrind "$1"
+    check_valgrind_output
+else
+    ./"$executable"
+fi
 RESULT=$?
 
 if [ $RESULT -eq 0 ]; then

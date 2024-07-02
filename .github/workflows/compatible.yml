@@ -16,7 +16,6 @@ jobs:
     - name: install dependencies
       run: |
         brew install gcc
-        brew install valgrind
     - name: build
       run: |
         make test
