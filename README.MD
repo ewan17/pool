@@ -18,7 +18,7 @@ The thread pool is provided as a precompiled static library (`threadpool.a`). To
    
    Example:
    ```bash
-   gcc -o example example.c -L/path/to/threadpool -lthreadpool -pthread
+   gcc -o example example.c lthreadpool.a
 
 ## Functions
 
