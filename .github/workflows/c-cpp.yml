@@ -1,0 +1,22 @@
+name: mac CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: install dependencies
+      run: |
+        brew install gcc
+        brew install valgrind
+    - name: build
+      run: |
+        make test
