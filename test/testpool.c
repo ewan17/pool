@@ -113,10 +113,10 @@ void heavy_test() {
 }
 
 int main(int argc, char *argv[]) {
-    // init_pool_test(8);
-    // add_group_test();
-    // add_work_test();
-    // add_work_test2();
+    init_pool_test(8);
+    add_group_test();
+    add_work_test();
+    add_work_test2();
     heavy_test();
     return 0;    
 }
