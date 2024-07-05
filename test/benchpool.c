@@ -9,7 +9,7 @@
 #include "pool.h"
 #include "jhs/thpool.h"
 
-#define BENCH_ITERATIONS 500
+#define BENCH_ITERATIONS 10000
 #define STR_NUM(x) #x
 #define STR(x) STR_NUM(x)
 #define MESSAGE "Mean time for "STR(BENCH_ITERATIONS)" iterations"
@@ -115,13 +115,13 @@ void multi_threaded_ewan17(int arr[], size_t len) {
 
     struct timespec start, finish;
     TPool *pool;
-    init_pool(&pool, 15);
+    init_pool(&pool, 30);
 
-    size_t numGroups = 3;
+    size_t numGroups = 5;
     TGroup *tg[numGroups];
     for (size_t i = 0; i < numGroups; i++) {
         TGroup *grp;
-        grp = add_group(pool, 5, 5, GROUP_FIXED);
+        grp = add_group(pool, 3, 6, GROUP_DYNAMIC);
         assert(grp != NULL);
         tg[i] = grp;
     }
@@ -158,7 +158,7 @@ void multi_threaded_jhs(int arr[], size_t len) {
     double stdev;
 
     struct timespec start, finish;
-    threadpool thpool = thpool_init(15);
+    threadpool thpool = thpool_init(30);
 
     for (size_t i = 0; i < BENCH_ITERATIONS; i++) {
         clock_gettime(CLOCK_MONOTONIC, &start);
@@ -191,10 +191,13 @@ int main(int argc, char *argv[]) {
      * @todo    handle input args later
      */
     // this will result in values larger than size_t, but we make sure the size_t variable will not overflow
-    int arr[] = {100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000,100000000};
-    size_t len = 20;
+    int arr[] = {1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000
+                    ,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000
+                        ,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000
+                            ,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000,1000000};
+    size_t len = 80;
 
-    single_threaded(arr, len);
+    // single_threaded(arr, len);
     multi_threaded_jhs(arr, len);
     multi_threaded_ewan17(arr, len);
 

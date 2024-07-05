@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # comment out the memcheck and uncomment the helgrind for synchronization
-#valgrind='valgrind --tool=helgrind'
+# valgrind='valgrind --tool=helgrind'
 valgrind='valgrind --tool=memcheck --leak-check=yes --show-leak-kinds=all'
 
 logfile="test.log"
